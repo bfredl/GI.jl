@@ -94,40 +94,70 @@ c_type{T<:ByteString}(t::Type{T}) = Ptr{Uint8}
 
 j_type(t) = t
 j_type{T<:Integer}(::Type{T}) = Integer
+
+# with some partial-evaluation ultra-magic
+# (or maybe just jit-compile time macros) 
+# this could be simplified significantly
 function create_method(info::GIFunctionInfo)
     ns = get_namespace(info)
     NS = _ns(ns)
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
-    argtypes = Type[extract_type(a) for a in args]
-    argnames = [symbol("_$(get_name(a))") for a in args]
+    prelude = Any[]
+    epilude = Any[]
+    cargtypes = Type[]
+    carglist = Any[]
+    jargs = Any[]
+    add_carg(expr,ctyp) = (push!(carglist,expr), push!(cargtypes,ctyp))
+    #argtypes = Type[extract_type(a) for a in args]
+    #argnames = [symbol("_$(get_name(a))") for a in args]
     if flags & IS_METHOD != 0
         object = get_container(info)
         iface = extract_type(object,true)
-        unshift!(argtypes, iface)
-        unshift!(argnames, :__instance)
+        push!(jargs, :( __instance :: $iface))
+        add_carg(:__instance, c_type(iface))
     end
     if flags & IS_CONSTRUCTOR != 0
         if name == :new
             name = symbol("$(get_name(get_container(info)))_new")
         end
     end
+    for arg in get_args(info)
+        aname = symbol("_$(get_name(arg))")
+        typ = extract_type(arg,true)
+        dir = get_direction(arg)
+        if dir = GI_DIRECTION_IN
+            push!(jargs, :( aname::$(j_type(typ))))
+            add_carg(aname, c_type(typ))
+        else
+            error("not yet supported")
+        end
+    end
+
     rettype = extract_type(get_return_type(info),true)
-    cargtypes = Expr(:tuple, Any[c_type(a) for a in argtypes]...)
+    cargtypes = Expr(:tuple, cargtypes...)
     crettype = c_type(rettype)
     symb = get_symbol(info)
-    j_call = Expr(:call, name, [ :($(argnames[i])::$(j_type(argtypes[i]))) for i=1:length(argtypes) ]... )
-    c_call = :(ccall($(string(symb)), $(c_type(rettype)), $cargtypes))
-    append!(c_call.args, argnames)
+    j_call = Expr(:call, name, jarg... )
+    c_call = :(__ret = ccall($(string(symb)), $(c_type(rettype)), $cargtypes))
+    append!(c_call.args, carglist)
+    returns = Any[:__ret]
     if rettype == None
         #pass
     elseif rettype <: GObjectI 
-        c_call = :( convert($rettype,$c_call) )
+        push!(epilude,:( __ret = convert($rettype,__ret) ))
     elseif rettype <: ByteString
-        c_call = :( bytestring($c_call) )
+        push!(epilude,:( __ret = bytestring(__ret) ))
     end
-    eval(NS, Expr(:function, j_call, quote $c_call end))
+    if length(returns) > 1
+        error("not yet implemented")
+    else
+        retstmt = returns[1]
+    end
+    blk = Expr(:block)
+    blk.args = Any[ prelude, c_call, epilude, retstmt ]
+    peval(NS, Expr(:function, j_call, blk))
     return eval(NS, name)
 end
     
