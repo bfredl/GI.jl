@@ -232,13 +232,30 @@ function get_value(info::GIConstantInfo)
     x = Array(Int64,1) #or mutable
     size = ccall((:g_constant_info_get_value,libgi),Cint,(Ptr{GIBaseInfo}, Ptr{Void}), info, x) 
     if typ <: Number
-        unsafe_load(Base.cconvert(Ptr{typ}, x))
+        unsafe_load(cconvert(Ptr{typ}, x))
     elseif typ == ByteString
-        #val = bytestring(unsafe_load(Base.cconvert(Ptr{Uint8},x)))
-        #ccall((:g_constant_info_free_value,libgi), Void, (Ptr{GIBaseInfo}, Ptr{Void}), info, x)
-        #val
-        nothing
+        strptr = unsafe_load(convert(Ptr{Ptr{Uint8}},x))
+        val = bytestring(strptr)
+        ccall((:g_constant_info_free_value,libgi), Void, (Ptr{GIBaseInfo}, Ptr{Void}), info, x)
+        val
     else
         nothing#unimplemented
     end
 end
+
+function get_consts(gns)
+    consts = Dict{Symbol,Any}() # presently Union(Number,ByteString)
+    for c in get_all(gns,GIConstantInfo)
+        name = get_name(c)
+        if !ismatch(r"^[a-zA-Z_]",string(name))
+            name = symbol("_$name") #FIXME: might collide
+        end
+        val = get_value(c)
+        if val != nothing
+            consts[name] = val
+        end
+    end
+    consts
+end
+
+

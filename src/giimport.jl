@@ -2,10 +2,10 @@
 const _gi_modules = Dict{Symbol,Module}()
 const _gi_modsyms = Dict{(Symbol,Symbol),Any}()
 
-function create_module(modname,gns)
-    mod = eval(Expr(:toplevel, :(module ($modname) 
-        const _gi_ns = $gns
-        const GI = $GI
+function create_module(modname,consts)
+    constdecs = [:(const $name = $(Meta.quot(val))) for (name,val) in consts]
+    eval(Expr(:toplevel, :(module ($modname) 
+        $(Expr(:block, constdecs...))
     end), modname))
 end
 
@@ -17,9 +17,11 @@ function init_ns(name::Symbol)
     for path=get_shlibs(gns) 
         dlopen(path,RTLD_GLOBAL) 
     end
-    # use submodules to GI module later
-    modname = symbol("_$name")
-    mod = GI.create_module(modname,gns)
+    consts = get_consts(gns)
+    consts[:GI] = GI
+    consts[:__ns] = gns
+    #modname = symbol("_$name")
+    mod = create_module(name,consts)
     _gi_modules[name] = mod
     mod
 end
@@ -28,7 +30,7 @@ end
 init_ns(:GObject)
 _ns(name) = (init_ns(name); _gi_modules[name])
 
-ensure_name(mod::Module, name) = ensure_name(mod._gi_ns, name)
+ensure_name(mod::Module, name) = ensure_name(mod.__ns, name)
 function ensure_name(ns::GINamespace, name::Symbol)
     if haskey(_gi_modsyms,(ns.name, name))
         return  _gi_modsyms[(ns.name, name)]
@@ -61,7 +63,7 @@ end
 
 
 const _gi_methods = Dict{(Symbol,Symbol,Symbol),Any}()
-ensure_method(mod::Module, rtype, method) = ensure_method(mod._gi_ns,rtype,method)
+ensure_method(mod::Module, rtype, method) = ensure_method(mod.__ns,rtype,method)
 
 function ensure_method(ns::GINamespace, rtype::Symbol, method::Symbol)
     qname = (ns.name,rtype,method)
@@ -138,7 +140,7 @@ macro gimport(ns, names)
             name = item.args[1]
             meths = item.args[2:end]
         end
-        info = NS._gi_ns[name]
+        info = NS.__ns[name]
         push!(q.args, :(const $(esc(name)) = $(ensure_name(NS, name))))
         for meth in meths
             push!(q.args, :(const $(esc(meth)) = $(GI.ensure_method(NS, name, meth))))

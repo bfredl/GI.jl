@@ -1,8 +1,8 @@
 module GI
     using GLib
     using GLib.MutableTypes
-    import Base: convert, show, showcompact, length, getindex, setindex!
-    import GLib: libgobject, libglib
+    import Base: convert, cconvert, show, showcompact, length, getindex, setindex!
+    import GLib: libgobject, libglib, bytestring
 
     # gimport interface (not final in any way)
     export @gimport
