@@ -57,9 +57,18 @@ showcompact(io::IO, info::GIArgInfo) = show(io,info) # bug in show.jl ?
 function show(io::IO, info::GIFunctionInfo) 
     print(io, "$(get_namespace(info)).$(get_name(info))(")
     for arg in get_args(info)
-        print(io, "$(get_name(arg))::$(extract_type(arg)), ")
+        dir = get_direction(arg)
+        typ = string(extract_type(arg))
+        alloc = is_caller_allocates(arg)
+        if dir == GI_DIRECTION_OUT
+            typ = "OUT{$typ,$alloc}"
+        elseif dir == GI_DIRECTION_INOUT
+            typ = "INOUT{$typ}"
+        end
+        print(io, "$(get_name(arg))::$typ, ")
     end
-    print(io,")\n")
+    rettyp = extract_type(get_return_type(info))
+    print(io,")::$rettyp\n")
 end
 
 
@@ -177,7 +186,7 @@ get_name(info::GIInvalidInfo) = symbol("<INVALID>")
 
 qual_name(info::GIRegisteredTypeInfo) = (get_namespace(info),get_name(info))
 
-for (owner,flag) in [ (:type, :is_pointer) ]
+for (owner,flag) in [ (:type, :is_pointer), (:arg, :is_caller_allocates) ]
     @eval function $flag(info::$(GIInfoTypes[owner]))
         ret = ccall(($("g_$(owner)_info_$(flag)"), libgi), Cint, (Ptr{GIBaseInfo},), info)
         return ret != 0
@@ -225,7 +234,8 @@ function extract_type(info::GIStructInfo,ret)
     GStruct # TODO: specialize
 end
 
-extract_type(info::GIEnumInfo,ret) = Enum 
+extract_type(info::GIEnumOrFlags,ret) = Enum 
+extract_type(info::GIInterfaceInfo,ret) = GObjectI #FIXME 
 
 const IS_METHOD = 1 << 0
 const IS_CONSTRUCTOR = 1 << 1
@@ -265,4 +275,8 @@ function get_enum_values(info::GIEnumOrFlags)
     valinfos = get_values(info)
     (Symbol=>Int64)[get_name(i)=>get_value(i) for i in get_values(info)]
 end
+
+const  GI_DIRECTION_IN = 0
+const  GI_DIRECTION_OUT =1 
+const  GI_DIRECTION_INOUT =2
 
