@@ -12,4 +12,6 @@ display(actor)
 #might not be consistend across clutter versions: 
 @assert Clutter.INPUT_NULL == "null"
 
+@assert Clutter.SwipeDirection.LEFT == 4
+
 end 

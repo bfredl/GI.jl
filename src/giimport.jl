@@ -1,12 +1,13 @@
 
 const _gi_modules = Dict{Symbol,Module}()
 const _gi_modsyms = Dict{(Symbol,Symbol),Any}()
-
-function create_module(modname,consts)
+peval(ex) = (print(ex); eval(ex))
+function create_module(modname,decs,consts)
     constdecs = [:(const $name = $(Meta.quot(val))) for (name,val) in consts]
-    eval(Expr(:toplevel, :(module ($modname) 
-        $(Expr(:block, constdecs...))
-    end), modname))
+    mod =  :(module ($modname); end)
+    append!(mod.args[3].args,decs)
+    append!(mod.args[3].args,constdecs)
+    eval(Expr(:toplevel, mod, modname))
 end
 
 function init_ns(name::Symbol)
@@ -20,10 +21,21 @@ function init_ns(name::Symbol)
     consts = get_consts(gns)
     consts[:GI] = GI
     consts[:__ns] = gns
+    enums = get_all(gns, GIEnumOrFlags)
+    decs = [enum_decl(enum) for enum in enums]
     #modname = symbol("_$name")
-    mod = create_module(name,consts)
+    mod = create_module(name,decs,consts)
     _gi_modules[name] = mod
     mod
+end
+
+function enum_decl(enum)
+    name = get_name(enum)
+    vals = get_enum_values(enum)
+    constdecs = [:(const $(uppercase(name)) = $val) for (name,val) in vals]
+    :(baremodule ($name) 
+        $(Expr(:block, constdecs...))
+    end)
 end
 
 

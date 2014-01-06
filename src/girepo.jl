@@ -40,7 +40,8 @@ for (i,itype) in enumerate(GIInfoTypesShortNames)
 end
 
 typealias GICallableInfo Union(GIFunctionInfo,GIVFuncInfo, GICallbackInfo, GISignalInfo)
-typealias GIRegisteredTypeInfo Union(GIEnumInfo,GIInterfaceInfo, GIObjectInfo, GIStructInfo, GIUnionInfo)
+typealias GIEnumOrFlags Union(GIEnumInfo,GIFlagsInfo)
+typealias GIRegisteredTypeInfo Union(GIEnumOrFlags,GIInterfaceInfo, GIObjectInfo, GIStructInfo, GIUnionInfo)
 
 show{Typeid}(io::IO, ::Type{GIInfo{Typeid}}) = print(io, GIInfoTypeNames[Typeid+1])
 
@@ -129,12 +130,14 @@ GIInfoTypes[:method] = GIFunctionInfo
 GIInfoTypes[:callable] = GICallableInfo
 GIInfoTypes[:registered_type] = GIRegisteredTypeInfo
 GIInfoTypes[:base] = GIInfo
+GIInfoTypes[:enum] = GIEnumOrFlags
 
 # one-> many relationships
 for (owner, property) in [
     (:object, :method), (:object, :signal), (:object, :interface),
     (:object, :property), (:object, :constant), (:object, :field),
-    (:interface, :method), (:interface, :signal), (:callable, :arg)]
+    (:interface, :method), (:interface, :signal), (:callable, :arg),
+    (:enum, :value)]
     @eval function $(symbol("get_$(property)s"))(info::$(GIInfoTypes[owner]))
         n = int(ccall(($("g_$(owner)_info_get_n_$(property)s"), libgi), Cint, (Ptr{GIBaseInfo},), info))
         GIInfo[ GIInfo( ccall(($("g_$(owner)_info_get_$property"), libgi), Ptr{GIBaseInfo}, (Ptr{GIBaseInfo}, Cint), info, i)) for i=0:n-1]
@@ -150,7 +153,6 @@ getindex(info::GIRegisteredTypeInfo, name::Symbol) = find_method(info, name)
 
 # one->one
 _unit(x) = x
-# reuse gvalues.jl instead?
 # FIXME: memory management of GIInfo:s
 _types = [GIInfo=>(Ptr{GIBaseInfo},GIInfo),
           Symbol=>(Ptr{Uint8}, (x -> symbol(bytestring(x))))]
@@ -160,7 +162,8 @@ for (owner,property,typ) in [
     (:callable, :return_type, GIInfo), (:callable, :caller_owns, Enum),
     (:function, :flags, Enum), (:function, :symbol, Symbol),
     (:arg, :type, GIInfo), (:arg, :direction, Enum),
-    (:type, :tag, Enum), (:type, :interface, GIInfo), (:constant, :type, GIInfo)]
+    (:type, :tag, Enum), (:type, :interface, GIInfo), (:constant, :type, GIInfo), 
+    (:value, :value, Int64) ]
 
     ctype, conv = get(_types, typ, (typ,_unit))
     @eval function $(symbol("get_$(property)"))(info::$(GIInfoTypes[owner]))
@@ -258,4 +261,8 @@ function get_consts(gns)
     consts
 end
 
+function get_enum_values(info::GIEnumOrFlags)
+    valinfos = get_values(info)
+    (Symbol=>Int64)[get_name(i)=>get_value(i) for i in get_values(info)]
+end
 
