@@ -28,6 +28,6 @@ move(w,100,100)
 set_title(w,"GI test")
 @assert get_title(w) == "GI test"
 
-@assert _Gtk.STOCK_SAVE = "gtk-save" #maybe not version independent?
+@assert _Gtk.STOCK_SAVE == "gtk-save" #maybe not version independent?
 @assert _Gtk.TreeModelFlags.LIST_ONLY == 2
 main()

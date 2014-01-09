@@ -39,6 +39,7 @@ function enum_decl(enum)
 end
 
 
+
 init_ns(:GObject)
 _ns(name) = (init_ns(name); _gi_modules[name])
 
@@ -76,6 +77,7 @@ end
 
 const _gi_methods = Dict{(Symbol,Symbol,Symbol),Any}()
 ensure_method(mod::Module, rtype, method) = ensure_method(mod.__ns,rtype,method)
+ensure_method(name::Symbol, rtype, method) = ensure_method(_ns(name),rtype,method)
 
 function ensure_method(ns::GINamespace, rtype::Symbol, method::Symbol)
     qname = (ns.name,rtype,method)
@@ -105,18 +107,18 @@ function create_method(info::GIFunctionInfo)
     flags = get_flags(info)
     args = get_args(info)
     prelude = Any[]
-    epilude = Any[]
+    epilogue = Any[]
     cargtypes = Type[]
     carglist = Any[]
     jargs = Any[]
-    add_carg(expr,ctyp) = (push!(carglist,expr), push!(cargtypes,ctyp))
+    add_carg(expr,ctyp)= (push!(carglist,expr); push!(cargtypes,ctyp))
     #argtypes = Type[extract_type(a) for a in args]
     #argnames = [symbol("_$(get_name(a))") for a in args]
     if flags & IS_METHOD != 0
         object = get_container(info)
         iface = extract_type(object,true)
-        push!(jargs, :( __instance :: $iface))
-        add_carg(:__instance, c_type(iface))
+        push!(jargs, :( instance :: $iface))
+        add_carg(:instance, c_type(iface))
     end
     if flags & IS_CONSTRUCTOR != 0
         if name == :new
@@ -127,11 +129,14 @@ function create_method(info::GIFunctionInfo)
         aname = symbol("_$(get_name(arg))")
         typ = extract_type(arg,true)
         dir = get_direction(arg)
-        if dir = GI_DIRECTION_IN
-            push!(jargs, :( aname::$(j_type(typ))))
+        if dir == GI_DIRECTION_IN
+            push!(jargs, :( $aname::$(j_type(typ))))
             add_carg(aname, c_type(typ))
         else
-            error("not yet supported")
+            #error("not yet supported")
+            #TODO
+            push!(jargs, :( $aname::$(j_type(typ))))
+            add_carg(aname, c_type(typ))
         end
     end
 
@@ -139,16 +144,17 @@ function create_method(info::GIFunctionInfo)
     cargtypes = Expr(:tuple, cargtypes...)
     crettype = c_type(rettype)
     symb = get_symbol(info)
-    j_call = Expr(:call, name, jarg... )
-    c_call = :(__ret = ccall($(string(symb)), $(c_type(rettype)), $cargtypes))
+    j_call = Expr(:call, name, jargs... )
+    c_call = :(ccall($(string(symb)), $(c_type(rettype)), $cargtypes))
     append!(c_call.args, carglist)
-    returns = Any[:__ret]
+    c_stmt = :( ret = $c_call)
+    returns = Any[:ret]
     if rettype == None
         #pass
     elseif rettype <: GObjectI 
-        push!(epilude,:( __ret = convert($rettype,__ret) ))
+        push!(epilogue,:( ret = convert($rettype,ret) ))
     elseif rettype <: ByteString
-        push!(epilude,:( __ret = bytestring(__ret) ))
+        push!(epilogue,:( ret = bytestring(ret) ))
     end
     if length(returns) > 1
         error("not yet implemented")
@@ -156,7 +162,7 @@ function create_method(info::GIFunctionInfo)
         retstmt = returns[1]
     end
     blk = Expr(:block)
-    blk.args = Any[ prelude, c_call, epilude, retstmt ]
+    blk.args = [ prelude, c_stmt, epilogue, retstmt ]
     peval(NS, Expr(:function, j_call, blk))
     return eval(NS, name)
 end
