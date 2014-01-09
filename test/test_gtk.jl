@@ -18,7 +18,8 @@ argx = args[1]
 GI.ensure_name(gtk, :Window)
 GI.ensure_method(gtk, :Window, :move)
 
-@gimport Gtk init, main, Window(move,set_title,get_title), Widget(show)
+@gimport Gtk init, main, Widget(show,get_size_request,set_size_request)
+@gimport Gtk Window(move,set_title,get_title)  
 init(0,C_NULL)
 w = Window_new(0)
 show(w) #NB: currently doesn't extend Base.show
@@ -28,6 +29,9 @@ move(w,100,100)
 set_title(w,"GI test")
 @assert get_title(w) == "GI test"
 
+set_size_request(w,300,400)
+@assert get_size_request(w) == (300,400)
+
 @assert _Gtk.STOCK_SAVE == "gtk-save" #maybe not version independent?
 @assert _Gtk.TreeModelFlags.LIST_ONLY == 2
-main()
+#main() //TODO: main-loop integration in a generic way 

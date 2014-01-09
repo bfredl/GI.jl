@@ -93,76 +93,100 @@ end
 c_type(t) = t
 c_type{T<:GObjectI}(t::Type{T}) = Ptr{GObjectI}
 c_type{T<:ByteString}(t::Type{T}) = Ptr{Uint8}
+c_type(t::Type{None}) = Void
 
 j_type(t) = t
 j_type{T<:Integer}(::Type{T}) = Integer
 
-# with some partial-evaluation ultra-magic
-# (or maybe just jit-compile time macros) 
+immutable Arg
+    name::Symbol
+    typ::Type
+    #ows_refcount::Bool
+end
+types(args::Array{Arg}) = [a.typ for a in args]
+names(args::Array{Arg}) = [a.name for a in args]
+jparams(args::Array{Arg}) = [:($(a.name)::$(a.typ)) for a in args]
+#there's probably a better way
+function make_ccall(id, rtype, args) 
+    argtypes = Expr(:tuple, types(args)...)
+    c_call = :(ccall($id, $rtype, $argtypes))
+    append!(c_call.args, names(args))
+    c_call
+end
+
+# rconvert could take some flag for refcounting/gc, maybe
+rconvert(t::Type,val) = convert(t,val)
+rconvert(::Type{ByteString}, val) = bytestring(val) 
+# this should not catch void* pointers
+rconvert(::Type{Void}, val) = error("something went wrong")
+
+# with some partial-evaluation half-magic
+# (or maybe just jit-compile-time macros) 
 # this could be simplified significantly
 function create_method(info::GIFunctionInfo)
-    ns = get_namespace(info)
-    NS = _ns(ns)
+    NS = _ns(get_namespace(info))
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
     prelude = Any[]
     epilogue = Any[]
-    cargtypes = Type[]
-    carglist = Any[]
-    jargs = Any[]
-    add_carg(expr,ctyp)= (push!(carglist,expr); push!(cargtypes,ctyp))
-    #argtypes = Type[extract_type(a) for a in args]
-    #argnames = [symbol("_$(get_name(a))") for a in args]
+    retvals = Arg[]
+    cargs = Arg[]
+    jargs = Arg[]
     if flags & IS_METHOD != 0
         object = get_container(info)
         iface = extract_type(object,true)
-        push!(jargs, :( instance :: $iface))
-        add_carg(:instance, c_type(iface))
+        push!(jargs, Arg(:instance, iface))
+        push!(cargs, Arg(:instance, c_type(iface)))
     end
-    if flags & IS_CONSTRUCTOR != 0
-        if name == :new
-            name = symbol("$(get_name(get_container(info)))_new")
-        end
+    if flags & IS_CONSTRUCTOR != 0 && name == :new
+        name = symbol("$(get_name(get_container(info)))_new")
+    end
+    rettype = extract_type(get_return_type(info),true)
+    if rettype != None
+        push!(retvals,Arg(:ret, rettype))
     end
     for arg in get_args(info)
         aname = symbol("_$(get_name(arg))")
         typ = extract_type(arg,true)
         dir = get_direction(arg)
         if dir == GI_DIRECTION_IN
-            push!(jargs, :( $aname::$(j_type(typ))))
-            add_carg(aname, c_type(typ))
+            push!(jargs, Arg(aname, j_type(typ)))
+            push!(cargs, Arg(aname, c_type(typ)))
         else
-            #error("not yet supported")
-            #TODO
-            push!(jargs, :( $aname::$(j_type(typ))))
-            add_carg(aname, c_type(typ))
+            ctyp = c_type(typ)
+            wname = symbol("m_$(get_name(arg))")
+            push!(prelude, :( $wname = GI.mutable($ctyp) ))
+            if dir == GI_DIRECTION_INOUT
+                push!(jargs, Arg( aname, j_type(typ)))
+                push!(prelude, :( $wname[] = $aname ))
+            end
+            push!(cargs, Arg(wname, Ptr{ctyp}))
+            push!(epilogue,:( $aname = $wname[] ))
+            push!(retvals, Arg( aname, typ))
         end
     end
 
-    rettype = extract_type(get_return_type(info),true)
-    cargtypes = Expr(:tuple, cargtypes...)
-    crettype = c_type(rettype)
     symb = get_symbol(info)
-    j_call = Expr(:call, name, jargs... )
-    c_call = :(ccall($(string(symb)), $(c_type(rettype)), $cargtypes))
-    append!(c_call.args, carglist)
-    c_stmt = :( ret = $c_call)
-    returns = Any[:ret]
-    if rettype == None
-        #pass
-    elseif rettype <: GObjectI 
-        push!(epilogue,:( ret = convert($rettype,ret) ))
-    elseif rettype <: ByteString
-        push!(epilogue,:( ret = bytestring(ret) ))
+    j_call = Expr(:call, name, jparams(jargs)... )
+    c_call = :( ret = $(make_ccall(string(symb), c_type(rettype), cargs)))
+    for ret in retvals
+        rname,typ = ret.name, ret.typ
+        typ == None && error("something went wrong!")
+        # unneccesary if, but makes generated wrappers easier to inspect
+        if typ != c_type(typ)
+            push!(epilogue,:( $rname = GI.rconvert($typ,$rname) ))
+        end
     end
-    if length(returns) > 1
-        error("not yet implemented")
+    if length(retvals) > 1
+        retstmt = Expr(:tuple, names(retvals)...)
+    elseif length(retvals) ==1 
+        retstmt = retvals[].name
     else
-        retstmt = returns[1]
+        retstmt = nothing
     end
     blk = Expr(:block)
-    blk.args = [ prelude, c_stmt, epilogue, retstmt ]
+    blk.args = [ prelude, c_call, epilogue, retstmt ]
     peval(NS, Expr(:function, j_call, blk))
     return eval(NS, name)
 end
