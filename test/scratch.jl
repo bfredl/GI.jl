@@ -4,11 +4,11 @@ reload("GI.jl")
 #using GI
 #@gimport Clutter init, Actor
 #end
-ns = GI.GINamespace(:Clutter)
+c = GI.GINamespace(:Clutter)
 Clutter = GI._ns(:Clutter)
 act = ns[:Actor]
 
-ns = GI.GINamespace(:Gtk)
+g = GI.GINamespace(:Gtk)
 for f = GI.get_all(ns,GI.GIFunctionInfo)
     wierd = false # whatever we happen to unsupport
     for arg in GI.get_args(f)
@@ -17,7 +17,7 @@ for f = GI.get_all(ns,GI.GIFunctionInfo)
         end
     end
     if wierd
-        print(f)
+        #print(f)
     end
 end
 

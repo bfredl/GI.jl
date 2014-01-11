@@ -18,6 +18,8 @@ function GIInfo(h::Ptr{GIBaseInfo})
     finalizer(info, info_unref)
     info
 end
+maybeginfo(h::Ptr{GIBaseInfo}) = (h == C_NULL) ? nothing : GIInfo(h)
+
 # don't call directly, called by gc
 function info_unref(info::GIInfo) 
     #core dumps on reload("GTK.jl"), 
@@ -160,14 +162,16 @@ for (owner, property) in [
 end
 getindex(info::GIRegisteredTypeInfo, name::Symbol) = find_method(info, name)
 
+typealias MaybeGIInfo Union(GIInfo,Nothing)
 # one->one
 _unit(x) = x
 # FIXME: memory management of GIInfo:s
 _types = [GIInfo=>(Ptr{GIBaseInfo},GIInfo),
+         MaybeGIInfo=>(Ptr{GIBaseInfo}, maybeginfo),
           Symbol=>(Ptr{Uint8}, (x -> symbol(bytestring(x))))]
 for (owner,property,typ) in [
     (:base, :name, Symbol), (:base, :namespace, Symbol),
-    (:base, :container, GIInfo), (:registered_type, :g_type, GType), (:object, :parent, GIInfo),
+    (:base, :container, GIInfo), (:registered_type, :g_type, GType), (:object, :parent, MaybeGIInfo),
     (:callable, :return_type, GIInfo), (:callable, :caller_owns, Enum),
     (:function, :flags, Enum), (:function, :symbol, Symbol),
     (:arg, :type, GIInfo), (:arg, :direction, Enum),
@@ -190,6 +194,15 @@ for (owner,flag) in [ (:type, :is_pointer), (:arg, :is_caller_allocates) ]
     @eval function $flag(info::$(GIInfoTypes[owner]))
         ret = ccall(($("g_$(owner)_info_$(flag)"), libgi), Cint, (Ptr{GIBaseInfo},), info)
         return ret != 0
+    end
+end
+
+is_gobject(::Nothing) = false
+function is_gobject(info::GIObjectInfo)
+    if GLib.g_type_name(get_g_type(info)) == :GObject
+        true
+    else 
+        is_gobject(get_parent(info))
     end
 end
 

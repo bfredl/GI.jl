@@ -23,6 +23,13 @@ function init_ns(name::Symbol)
     consts[:__ns] = gns
     enums = get_all(gns, GIEnumOrFlags)
     decs = [enum_decl(enum) for enum in enums]
+    objs = get_all(gns, GIObjectInfo)
+    for obj in objs
+        if is_gobject(obj)
+            ensure_type(obj)
+        end
+    end
+
     #modname = symbol("_$name")
     mod = create_module(name,decs,consts)
     _gi_modules[name] = mod
@@ -38,9 +45,6 @@ function enum_decl(enum)
     end)
 end
 
-
-
-init_ns(:GObject)
 _ns(name) = (init_ns(name); _gi_modules[name])
 
 ensure_name(mod::Module, name) = ensure_name(mod.__ns, name)
@@ -57,15 +61,17 @@ end
 module _AllTypes
     import GI
     import Gtk.GLib
+    const GObject = GLib.GObject
     # temporary solution, we will generate all types at once, next step
-    peval(ns,ex) = (print(ex); eval(ns,ex))
     function ensure_type(info::GI.GIObjectInfo)
         g_type = GI.get_g_type(info)
-        name = GLib.g_type_name(g_type)
+        name = symbol(GLib.g_type_name(g_type))
+        if name == :GObject
+            return name
+        end
         if(isdefined(current_module(), name))
             return name
         end
-        iname = symbol(string(name,'I'))
         getgtype = :( GI.get_g_type($info) )
         @eval @GLib.type_decl $name $g_type $getgtype
         name
@@ -211,9 +217,6 @@ function create_method(info::GIFunctionInfo)
     return eval(NS, name)
 end
     
-
-
-
 #some convenience macros, just for the show
 macro gimport(ns, names)
     _name = (ns == :Gtk) ? :_Gtk : ns
