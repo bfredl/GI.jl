@@ -53,10 +53,32 @@ function ensure_name(ns::GINamespace, name::Symbol)
     sym
 end
 
+
+module _AllTypes
+    import GI
+    import Gtk.GLib
+    # temporary solution, we will generate all types at once, next step
+    peval(ns,ex) = (print(ex); eval(ns,ex))
+    function ensure_type(info::GI.GIObjectInfo)
+        g_type = GI.get_g_type(info)
+        name = GLib.g_type_name(g_type)
+        if(isdefined(current_module(), name))
+            return name
+        end
+        iname = symbol(string(name,'I'))
+        getgtype = :( GI.get_g_type($info) )
+        @eval @GLib.type_decl $name $g_type $getgtype
+        name
+    end
+end
+# we may use `using Alltypes` to mean "import all gtypenames"
+const ensure_type = _AllTypes.ensure_type 
+        
 function load_name(ns,name,info::GIObjectInfo)
-    rt = extract_type(info,false)
+    gname = ensure_type(info)
+    rt = GLib.gtype_wrappers[gname]
     if find_method(ns[name], :new) != nothing
-        #extract_type might not do this, as there will be mutual dependency
+        #ensure_type might not do this, as there will be mutual dependency
         ensure_method(ns,name,:new) 
     end
     rt
@@ -69,11 +91,9 @@ end
 peval(mod, expr) = (print(expr,'\n'); eval(mod,expr))
 
 function extract_type(info::GIObjectInfo,iface=false) 
-    g_type = get_g_type(info)
-    name = GLib.g_type_name(g_type)
-    iface ? GLib.get_iface(name,g_type) : GLib.get_wrapper(name,g_type)
+    gname = ensure_type(info)
+    iface ? GLib.gtype_ifaces[gname] : GLib.gtype_wrappers[gname]
 end
-
 
 const _gi_methods = Dict{(Symbol,Symbol,Symbol),Any}()
 ensure_method(mod::Module, rtype, method) = ensure_method(mod.__ns,rtype,method)
