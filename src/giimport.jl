@@ -69,7 +69,7 @@ module _AllTypes
         if name == :GObject
             return name
         end
-        if(isdefined(current_module(), name))
+        if(isdefined(_AllTypes, name))
             return name
         end
         getgtype = :( GI.get_g_type($info) )
@@ -127,7 +127,9 @@ j_type{T<:Integer}(::Type{T}) = Integer
 immutable Arg
     name::Symbol
     typ::Type
-    #ows_refcount::Bool
+    owns::Bool #true: we should free the string/etc
+    maybenull::Bool
+    Arg(nam,typ,owns=false,maybe=false) = new(nam,typ,owns,maybe)
 end
 types(args::Array{Arg}) = [a.typ for a in args]
 names(args::Array{Arg}) = [a.name for a in args]
@@ -139,12 +141,6 @@ function make_ccall(id, rtype, args)
     append!(c_call.args, names(args))
     c_call
 end
-
-# rconvert could take some flag for refcounting/gc, maybe
-rconvert(t::Type,val) = convert(t,val)
-rconvert(::Type{ByteString}, val) = bytestring(val) 
-# this should not catch void* pointers
-rconvert(::Type{Void}, val) = error("something went wrong")
 
 # with some partial-evaluation half-magic
 # (or maybe just jit-compile-time macros) 
@@ -170,38 +166,48 @@ function create_method(info::GIFunctionInfo)
     end
     rettype = extract_type(get_return_type(info),true)
     if rettype != None
-        push!(retvals,Arg(:ret, rettype))
+        owns = get_caller_owns(info) != TRANSFER_NOTHING
+        maybe = may_return_null(info)
+        if rettype == ByteString
+            maybe = true # seems that Girepository lies to us
+        end
+
+        push!(retvals,Arg(:ret, rettype, owns, maybe))
     end
     for arg in get_args(info)
         aname = symbol("_$(get_name(arg))")
         typ = extract_type(arg,true)
         dir = get_direction(arg)
-        if dir == GI_DIRECTION_IN
+        owns = get_ownership_transfer(arg) != TRANSFER_NOTHING
+        maybenull = may_be_null(arg)
+        if dir == DIRECTION_IN
             push!(jargs, Arg(aname, j_type(typ)))
             push!(cargs, Arg(aname, c_type(typ)))
         else
             ctyp = c_type(typ)
             wname = symbol("m_$(get_name(arg))")
             push!(prelude, :( $wname = GI.mutable($ctyp) ))
-            if dir == GI_DIRECTION_INOUT
+            if dir == DIRECTION_INOUT
                 push!(jargs, Arg( aname, j_type(typ)))
                 push!(prelude, :( $wname[] = $aname ))
             end
             push!(cargs, Arg(wname, Ptr{ctyp}))
             push!(epilogue,:( $aname = $wname[] ))
-            push!(retvals, Arg( aname, typ))
+            push!(retvals, Arg( aname, typ, owns, maybenull))
         end
     end
 
     symb = get_symbol(info)
     j_call = Expr(:call, name, jparams(jargs)... )
     c_call = :( ret = $(make_ccall(string(symb), c_type(rettype), cargs)))
-    for ret in retvals
-        rname,typ = ret.name, ret.typ
-        typ == None && error("something went wrong!")
+    for r in retvals
+        nam = r.name
+        r.typ == None && error("something went wrong!")
+        ctype = c_type(r.typ)
+        rtype = r.maybenull ? Maybe(r.typ) : r.typ
         # unneccesary if, but makes generated wrappers easier to inspect
-        if typ != c_type(typ)
-            push!(epilogue,:( $rname = GI.rconvert($typ,$rname) ))
+        if rtype != ctype
+            push!(epilogue,:( $nam = GI.rconvert($rtype,$nam,$(r.owns) )))
         end
     end
     if length(retvals) > 1

@@ -9,13 +9,13 @@ type GIInfo{Typeid}
     handle::Ptr{GIBaseInfo}
 end
 
-function GIInfo(h::Ptr{GIBaseInfo}) 
+function GIInfo(h::Ptr{GIBaseInfo},owns=true) 
     if h == C_NULL 
         error("Cannot constrct GIInfo from NULL")
     end
     typeid = int(ccall((:g_base_info_get_type, libgi), Enum, (Ptr{GIBaseInfo},), h))
     info = GIInfo{typeid}(h)
-    finalizer(info, info_unref)
+    owns && finalizer(info, info_unref)
     info
 end
 maybeginfo(h::Ptr{GIBaseInfo}) = (h == C_NULL) ? nothing : GIInfo(h)
@@ -62,9 +62,9 @@ function show(io::IO, info::GIFunctionInfo)
         dir = get_direction(arg)
         typ = string(extract_type(arg))
         alloc = is_caller_allocates(arg)
-        if dir == GI_DIRECTION_OUT
+        if dir == DIRECTION_OUT
             typ = "OUT{$typ,$alloc}"
-        elseif dir == GI_DIRECTION_INOUT
+        elseif dir == DIRECTION_INOUT
             typ = "INOUT{$typ}"
         end
         print(io, "$(get_name(arg))::$typ, ")
@@ -128,8 +128,12 @@ end
 
 
 function get_shlibs(ns)
-    names = bytestring(ccall((:g_irepository_get_shared_library, libgi), Ptr{Uint8}, (Ptr{GIRepository}, Ptr{Uint8}), girepo, ns))
-    split(names,",")
+    names = ccall((:g_irepository_get_shared_library, libgi), Ptr{Uint8}, (Ptr{GIRepository}, Ptr{Uint8}), girepo, ns)
+    if names != C_NULL
+        split(bytestring(names),",")
+    else
+        String[]
+    end
 end
 get_shlibs(info::GIInfo) = get_shlibs(get_namespace(info))
 
@@ -142,6 +146,20 @@ GIInfoTypes[:callable] = GICallableInfo
 GIInfoTypes[:registered_type] = GIRegisteredTypeInfo
 GIInfoTypes[:base] = GIInfo
 GIInfoTypes[:enum] = GIEnumOrFlags
+
+Maybe(T) = Union(T,Nothing)
+
+rconvert(t,v) = rconvert(t,v,false)
+rconvert(t::Type,val,owns) = convert(t,val)
+rconvert(::Type{ByteString}, val,owns) = bytestring(val,owns) 
+rconvert(::Type{Symbol}, val,owns) = symbol(bytestring(val,owns) )
+rconvert(::Type{GIInfo}, val::Ptr{GIBaseInfo},owns) = GIInfo(val,owns) 
+#rconvert{T}(::Type{Union(T,Nothing)}, val,owns) = (val == C_NULL) ? nothing : rconvert(T,val,owns)
+# :(
+for typ in [GIInfo, ByteString, GObject]
+    @eval rconvert(::Type{Union($typ,Nothing)}, val,owns) = (val == C_NULL) ? nothing : rconvert($typ,val,owns)
+end
+rconvert(::Type{Void}, val) = error("something went wrong")
 
 # one-> many relationships
 for (owner, property) in [
@@ -156,7 +174,7 @@ for (owner, property) in [
     if property == :method
         @eval function $(symbol("find_$(property)"))(info::$(GIInfoTypes[owner]), name)
             ptr = ccall(($("g_$(owner)_info_find_$(property)"), libgi), Ptr{GIBaseInfo}, (Ptr{GIBaseInfo},Ptr{Uint8}), info, name)
-            (ptr == C_NULL) ? nothing : GIInfo(ptr)
+            rconvert(Maybe(GIInfo), ptr, true)
         end
     end
 end
@@ -164,23 +182,22 @@ getindex(info::GIRegisteredTypeInfo, name::Symbol) = find_method(info, name)
 
 typealias MaybeGIInfo Union(GIInfo,Nothing)
 # one->one
-_unit(x) = x
 # FIXME: memory management of GIInfo:s
-_types = [GIInfo=>(Ptr{GIBaseInfo},GIInfo),
-         MaybeGIInfo=>(Ptr{GIBaseInfo}, maybeginfo),
-          Symbol=>(Ptr{Uint8}, (x -> symbol(bytestring(x))))]
+ctypes = [GIInfo=>Ptr{GIBaseInfo},
+         MaybeGIInfo=>Ptr{GIBaseInfo},
+          Symbol=>Ptr{Uint8}]
 for (owner,property,typ) in [
     (:base, :name, Symbol), (:base, :namespace, Symbol),
     (:base, :container, GIInfo), (:registered_type, :g_type, GType), (:object, :parent, MaybeGIInfo),
     (:callable, :return_type, GIInfo), (:callable, :caller_owns, Enum),
     (:function, :flags, Enum), (:function, :symbol, Symbol),
-    (:arg, :type, GIInfo), (:arg, :direction, Enum),
+    (:arg, :type, GIInfo), (:arg, :direction, Enum), (:arg, :ownership_transfer, Enum),
     (:type, :tag, Enum), (:type, :interface, GIInfo), (:constant, :type, GIInfo), 
     (:value, :value, Int64) ]
 
-    ctype, conv = get(_types, typ, (typ,_unit))
+    ctype = get(ctypes, typ, typ)
     @eval function $(symbol("get_$(property)"))(info::$(GIInfoTypes[owner]))
-        $conv(ccall(($("g_$(owner)_info_get_$(property)"), libgi), $ctype, (Ptr{GIBaseInfo},), info))
+        rconvert($typ,ccall(($("g_$(owner)_info_get_$(property)"), libgi), $ctype, (Ptr{GIBaseInfo},), info))
     end
 end
 
@@ -190,7 +207,7 @@ get_name(info::GIInvalidInfo) = symbol("<INVALID>")
 
 qual_name(info::GIRegisteredTypeInfo) = (get_namespace(info),get_name(info))
 
-for (owner,flag) in [ (:type, :is_pointer), (:arg, :is_caller_allocates) ]
+for (owner,flag) in [ (:type, :is_pointer), (:callable, :may_return_null), (:arg, :is_caller_allocates), (:arg, :may_be_null) ]
     @eval function $flag(info::$(GIInfoTypes[owner]))
         ret = ccall(($("g_$(owner)_info_$(flag)"), libgi), Cint, (Ptr{GIBaseInfo},), info)
         return ret != 0
@@ -218,16 +235,16 @@ const TAG_BASIC_MAX = 13
 const TAG_ARRAY = 15
 const TAG_INTERFACE = 16 
 
-extract_type(info::Union(GIArgInfo,GIConstantInfo),ret=false) = extract_type(get_type(info),ret)
+extract_type(info::Union(GIArgInfo,GIConstantInfo),iface=false) = extract_type(get_type(info),iface)
 
-function extract_type(info::GITypeInfo,ret=false)
+function extract_type(info::GITypeInfo,iface=false)
     tag = get_tag(info)
     if tag <= TAG_BASIC_MAX
         basetype = typetag_primitive[tag+1]
     elseif tag == TAG_INTERFACE
         # Object Types n such
-        iface = get_interface(info)
-        basetype = extract_type(iface,ret)
+        typ = get_interface(info)
+        basetype = extract_type(typ,iface)
     elseif tag == TAG_ARRAY
         basetype = Void
     else
@@ -249,9 +266,6 @@ end
 
 extract_type(info::GIEnumOrFlags,ret) = Enum 
 extract_type(info::GIInterfaceInfo,ret) = GObjectI #FIXME 
-
-const IS_METHOD = 1 << 0
-const IS_CONSTRUCTOR = 1 << 1
 
 function get_value(info::GIConstantInfo)
     typ = extract_type(info)
@@ -289,7 +303,13 @@ function get_enum_values(info::GIEnumOrFlags)
     (Symbol=>Int64)[get_name(i)=>get_value(i) for i in get_values(info)]
 end
 
-const  GI_DIRECTION_IN = 0
-const  GI_DIRECTION_OUT =1 
-const  GI_DIRECTION_INOUT =2
+const IS_METHOD = 1 << 0
+const IS_CONSTRUCTOR = 1 << 1
 
+const DIRECTION_IN = 0
+const DIRECTION_OUT =1 
+const DIRECTION_INOUT =2
+
+const TRANSFER_NOTHING =0
+const TRANSFER_CONTAINER =1
+const TRANSFER_EVERYTHING =2

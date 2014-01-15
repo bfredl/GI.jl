@@ -26,6 +26,7 @@ show(w) #NB: currently doesn't extend Base.show
 move(w,100,100)
 
 #string passing
+@assert get_title(w) == nothing # handle NULL returns
 set_title(w,"GI test")
 @assert get_title(w) == "GI test"
 
