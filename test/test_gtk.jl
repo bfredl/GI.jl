@@ -35,9 +35,8 @@ set_size_request(w,300,400)
 
 @assert _Gtk.STOCK_SAVE == "gtk-save" #maybe not version independent?
 @assert _Gtk.TreeModelFlags.LIST_ONLY == 2
-#main() //TODO: main-loop integration in a generic way 
 
-
+#error handling
 @gimport GdkPixbuf Pixbuf(new_from_file)
 #shall throw
 new_from_file("this_file_doesnt_exist")

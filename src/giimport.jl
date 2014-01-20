@@ -1,6 +1,8 @@
-
 const _gi_modules = Dict{Symbol,Module}()
+
+#we will get rid of this one:
 const _gi_modsyms = Dict{(Symbol,Symbol),Any}()
+
 peval(ex) = (print(ex); eval(ex))
 function create_module(modname,decs,consts)
     constdecs = [:(const $name = $(Meta.quot(val))) for (name,val) in consts]
@@ -47,12 +49,13 @@ end
 
 _ns(name) = (init_ns(name); _gi_modules[name])
 
-ensure_name(mod::Module, name) = ensure_name(mod.__ns, name)
-function ensure_name(ns::GINamespace, name::Symbol)
+ensure_name(ns::GINamespace, name) = ensure_name(_ns(ns.name), name)
+function ensure_name(mod::Module, name::Symbol)
+    ns = mod.__ns
     if haskey(_gi_modsyms,(ns.name, name))
         return  _gi_modsyms[(ns.name, name)]
     end
-    sym = load_name(ns,name,ns[name])
+    sym = load_name(mod,ns,name,ns[name])
     _gi_modsyms[(ns.name,name)] = sym
     sym
 end
@@ -62,7 +65,7 @@ module _AllTypes
     import GI
     import Gtk.GLib
     const GObject = GLib.GObject
-    # temporary solution, we will generate all types at once, next step
+    # temporary solution, the @type_decl should go right into the generated module
     function ensure_type(info::GI.GIObjectInfo)
         g_type = GI.get_g_type(info)
         name = symbol(GLib.g_type_name(g_type))
@@ -80,17 +83,25 @@ end
 # we may use `using Alltypes` to mean "import all gtypenames"
 const ensure_type = _AllTypes.ensure_type 
         
-function load_name(ns,name,info::GIObjectInfo)
+function load_name(mod,ns,name::Symbol,info::GIObjectInfo)
     gname = ensure_type(info)
-    rt = GLib.gtype_wrappers[gname]
+    iname = symbol(string(name,"I"))
+    wrap = GLib.gtype_wrappers[gname]
+    iface = GLib.gtype_ifaces[gname]
+    eval(mod, :(const $name = $wrap))
+    eval(mod, :(const $iname = $iface))
     if find_method(ns[name], :new) != nothing
         #ensure_type might not do this, as there will be mutual dependency
         ensure_method(ns,name,:new) 
     end
-    rt
+    wrap
 end
 
-function load_name(ns,name,info::GIFunctionInfo)
+function load_name(mod,ns,name::Symbol,info::GIInterfaceInfo)
+    GObjectI #FIXME
+end
+
+function load_name(mod,ns,name,info::GIFunctionInfo)
     create_method(info)
 end
 
@@ -99,6 +110,12 @@ peval(mod, expr) = (print(expr,'\n'); eval(mod,expr))
 function extract_type(info::GIObjectInfo,iface=false) 
     gname = ensure_type(info)
     iface ? GLib.gtype_ifaces[gname] : GLib.gtype_wrappers[gname]
+end
+
+function extract_type(info::GIInterfaceInfo,iface=false) 
+    # not sure the best way to implement this given no multiple inheritance
+    # maybe clutter_container_add_actor should become container_add_actor
+    GObjectI #FIXME 
 end
 
 const _gi_methods = Dict{(Symbol,Symbol,Symbol),Any}()
@@ -123,6 +140,7 @@ c_type(t::Type{None}) = Void
 
 j_type(t) = t
 j_type{T<:Integer}(::Type{T}) = Integer
+j_type(::Type{Ptr{GStruct}}) = Mutable #FIXME
 
 immutable Arg
     name::Symbol
@@ -170,8 +188,8 @@ function create_method(info::GIFunctionInfo)
         push!(jargs, Arg(:instance, iface))
         push!(cargs, Arg(:instance, c_type(iface)))
     end
-    if flags & IS_CONSTRUCTOR != 0 && name == :new
-        name = symbol("$(get_name(get_container(info)))_new")
+    if flags & IS_CONSTRUCTOR != 0
+        name = symbol("$(get_name(get_container(info)))_$name")
     end
     rettype = extract_type(get_return_type(info),true)
     if rettype != None
@@ -237,7 +255,8 @@ function create_method(info::GIFunctionInfo)
     return eval(NS, name)
 end
     
-#some convenience macros, just for the show
+#convenience macro for testing 
+#final API might be different
 macro gimport(ns, names)
     _name = (ns == :Gtk) ? :_Gtk : ns
     NS = _ns(ns)
