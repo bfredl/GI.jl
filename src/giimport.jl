@@ -142,6 +142,15 @@ function make_ccall(id, rtype, args)
     c_call
 end
 
+function check_gerr(err::Mutable{Ptr{GError}})
+    if err[] != C_NULL
+        gerror = GError(err[])
+        emsg = bytestring(gerror.message)
+        ccall((:g_clear_error,libglib),Void,(Ptr{Ptr{GError}},),err)
+        error(emsg)
+    end
+end
+
 # with some partial-evaluation half-magic
 # (or maybe just jit-compile-time macros) 
 # this could be simplified significantly
@@ -195,6 +204,11 @@ function create_method(info::GIFunctionInfo)
             push!(epilogue,:( $aname = $wname[] ))
             push!(retvals, Arg( aname, typ, owns, maybenull))
         end
+    end
+    if flags & THROWS != 0
+        push!(prelude, :( err = GI.mutable(Ptr{GI.GError}); err[] = C_NULL; ))
+        push!(cargs, Arg(:err, Ptr{Ptr{GI.GError}}))
+        unshift!(epilogue, :( GI.check_gerr(err) ))
     end
 
     symb = get_symbol(info)

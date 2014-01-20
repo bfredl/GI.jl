@@ -58,6 +58,7 @@ showcompact(io::IO, info::GIArgInfo) = show(io,info) # bug in show.jl ?
 
 function show(io::IO, info::GIFunctionInfo) 
     print(io, "$(get_namespace(info)).$(get_name(info))(")
+    flags = get_flags(info)
     for arg in get_args(info)
         dir = get_direction(arg)
         typ = string(extract_type(arg))
@@ -70,7 +71,12 @@ function show(io::IO, info::GIFunctionInfo)
         print(io, "$(get_name(arg))::$typ, ")
     end
     rettyp = extract_type(get_return_type(info))
-    print(io,")::$rettyp\n")
+    print(io,")::$rettyp")
+    if flags & THROWS != 0
+        print(io, " THROWS")
+    end
+    print(io, "\n")
+
 end
 
 
@@ -303,8 +309,12 @@ function get_enum_values(info::GIEnumOrFlags)
     (Symbol=>Int64)[get_name(i)=>get_value(i) for i in get_values(info)]
 end
 
-const IS_METHOD = 1 << 0
+const IS_METHOD     = 1 << 0
 const IS_CONSTRUCTOR = 1 << 1
+const IS_GETTER      = 1 << 2
+const IS_SETTER      = 1 << 3
+const WRAPS_VFUNC    = 1 << 4
+const THROWS = 1 << 5
 
 const DIRECTION_IN = 0
 const DIRECTION_OUT =1 
