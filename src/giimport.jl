@@ -75,8 +75,9 @@ module _AllTypes
         if(isdefined(_AllTypes, name))
             return name
         end
-        getgtype = :( GI.get_g_type($info) )
-        @eval @GLib.type_decl $name $g_type $getgtype
+            
+        @eval @GLib.Gtype_decl $name $g_type (
+            g_type(::Type{$(esc(name))}) = esc(get_g_type)($info) )
         name
     end
 end
@@ -216,7 +217,7 @@ function create_method(info::GIFunctionInfo)
             push!(prelude, :( $wname = GI.mutable($ctyp) ))
             if dir == DIRECTION_INOUT
                 push!(jargs, Arg( aname, j_type(typ)))
-                push!(prelude, :( $wname[] = $aname ))
+                push!(prelude, :( $wname[] = Base.cconvert($ctyp,$aname) ))
             end
             push!(cargs, Arg(wname, Ptr{ctyp}))
             push!(epilogue,:( $aname = $wname[] ))
