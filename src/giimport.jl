@@ -1,30 +1,28 @@
+#TODO: completely separate code-generation and dyn-importing/caching mechanism
+#      make generated code export-clean (no `:($(TypeName))` )
 const _gi_modules = Dict{Symbol,Module}()
 
 #we will get rid of this one:
 const _gi_modsyms = Dict{(Symbol,Symbol),Any}()
 
 peval(ex) = (print(ex); eval(ex))
-function create_module(modname,decs,consts)
-    constdecs = [:(const $name = $(Meta.quot(val))) for (name,val) in consts]
+function create_module(modname,decs)
     mod =  :(module ($modname); end)
     append!(mod.args[3].args,decs)
-    append!(mod.args[3].args,constdecs)
     eval(Expr(:toplevel, mod, modname))
 end
 
-function init_ns(name::Symbol)
+function get_ns(name::Symbol)
     if haskey(_gi_modules,name)
-        return
+        return _gi_modules[name]
     end
     gns = GINamespace(name)
     for path=get_shlibs(gns) 
         dlopen(path,RTLD_GLOBAL) 
     end
-    consts = get_consts(gns)
-    consts[:GI] = GI
-    consts[:__ns] = gns
-    enums = get_all(gns, GIEnumOrFlags)
-    decs = [enum_decl(enum) for enum in enums]
+    decs = const_decls(gns)
+    append!(decs, enum_decls(gns))
+    push!(decs, :( const GI = $GI; const __ns = $gns ) )
     objs = get_all(gns, GIObjectInfo)
     for obj in objs
         if is_gobject(obj)
@@ -32,24 +30,44 @@ function init_ns(name::Symbol)
         end
     end
 
-    #modname = symbol("_$name")
-    mod = create_module(name,decs,consts)
+    mod = create_module(name,decs)
     _gi_modules[name] = mod
     mod
 end
 
-function enum_decl(enum)
-    name = get_name(enum)
+function enum_decl(enum,enumname)
     vals = get_enum_values(enum)
-    constdecs = [:(const $(uppercase(name)) = $val) for (name,val) in vals]
-    :(baremodule ($name) 
-        $(Expr(:block, constdecs...))
-    end)
+    body = Expr(:block)
+    for (name,val) in vals
+        if match(r"^[a-zA-Z_]",string(name)) === nothing
+            name = symbol("_$name")
+        end
+        push!(body.args, :(const $(uppercase(name)) = $val) )
+    end
+    Expr(:toplevel,Expr(:module, false, symbol(enumname), body))
 end
 
-_ns(name) = (init_ns(name); _gi_modules[name])
+const_decls(ns) = const_decls(ns,x->x)
+function const_decls(ns,fmt)
+    consts = get_consts(ns)
+    decs = Expr[]
+    for (name,val) in consts
+        name = fmt(name)
+        if name !== nothing
+            push!(decs, :(const $(symbol(name)) = $(val)) )
+        end
+    end
+    decs
+end
 
-ensure_name(ns::GINamespace, name) = ensure_name(_ns(ns.name), name)
+enum_decls(ns) = enum_decls(ns,x->x)
+function enum_decls(ns,fmt)
+    enums = get_all(ns, GIEnumOrFlags)
+    [enum_decl(enum,fmt(get_name(enum))) for enum in enums]
+end
+
+
+ensure_name(ns::GINamespace, name) = ensure_name(get_ns(ns.name), name)
 function ensure_name(mod::Module, name::Symbol)
     ns = mod.__ns
     if haskey(_gi_modsyms,(ns.name, name))
@@ -161,7 +179,12 @@ function make_ccall(id, rtype, args)
     c_call
 end
 
-function check_gerr(err::Mutable{Ptr{GError}})
+function err_buf()
+    err = GI.mutable(Ptr{GError}); 
+    err.x = C_NULL
+    err
+end
+function check_err(err::Mutable{Ptr{GError}})
     if err[] != C_NULL
         gerror = GError(err[])
         emsg = bytestring(gerror.message)
@@ -174,7 +197,7 @@ end
 # (or maybe just jit-compile-time macros) 
 # this could be simplified significantly
 function create_method(info::GIFunctionInfo)
-    NS = _ns(get_namespace(info))
+    NS = get_ns(get_namespace(info))
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
@@ -225,9 +248,9 @@ function create_method(info::GIFunctionInfo)
         end
     end
     if flags & THROWS != 0
-        push!(prelude, :( err = GI.mutable(Ptr{GI.GError}); err[] = C_NULL; ))
+        push!(prelude, :( err = GI.err_buf() ))
         push!(cargs, Arg(:err, Ptr{Ptr{GI.GError}}))
-        unshift!(epilogue, :( GI.check_gerr(err) ))
+        unshift!(epilogue, :( GI.check_err(err) ))
     end
 
     symb = get_symbol(info)
@@ -235,7 +258,7 @@ function create_method(info::GIFunctionInfo)
     c_call = :( ret = $(make_ccall(string(symb), c_type(rettype), cargs)))
     for r in retvals
         nam = r.name
-        r.typ == None && error("something went wrong!")
+        @assert r.typ !== None
         ctype = c_type(r.typ)
         rtype = r.maybenull ? Maybe(r.typ) : r.typ
         # unneccesary if, but makes generated wrappers easier to inspect
@@ -260,7 +283,7 @@ end
 #final API might be different
 macro gimport(ns, names)
     _name = (ns == :Gtk) ? :_Gtk : ns
-    NS = _ns(ns)
+    NS = get_ns(ns)
     ns = GINamespace(ns)
     q = quote  $(esc(_name)) = $(NS) end
     if isa(names,Expr)  && names.head == :tuple

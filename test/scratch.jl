@@ -1,5 +1,5 @@
 #scratch file for interactive testing
-reload("GI.jl")
+#reload("GI.jl")
 #module Test
 #using GI
 #@gimport Clutter init, Actor

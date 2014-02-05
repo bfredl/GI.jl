@@ -39,5 +39,5 @@ set_size_request(w,300,400)
 #error handling
 @gimport GdkPixbuf Pixbuf(new_from_file)
 #shall throw
-new_from_file("this_file_doesnt_exist")
+new_from_file("EXPECT THIS TO FAIL")
 
