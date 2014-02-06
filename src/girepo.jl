@@ -304,9 +304,11 @@ function get_consts(gns)
     consts
 end
 
+
+
 function get_enum_values(info::GIEnumOrFlags)
     valinfos = get_values(info)
-    (Symbol=>Int64)[get_name(i)=>get_value(i) for i in get_values(info)]
+    [(get_name(i),get_value(i)) for i in get_values(info)]
 end
 
 const IS_METHOD     = 1 << 0
