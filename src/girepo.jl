@@ -304,7 +304,10 @@ function get_consts(gns)
     consts
 end
 
-
+function get_enums(gns)
+    enums = get_all(gns, GIEnumOrFlags)
+    [(get_name(enum),get_enum_values(enum),isa(enum,GIFlagsInfo)) for enum in enums]
+end
 
 function get_enum_values(info::GIEnumOrFlags)
     valinfos = get_values(info)
