@@ -5,11 +5,14 @@ module GI
     import Base: convert, cconvert, show, showcompact, length, getindex, setindex!, uppercase
     import Gtk.GLib: libgobject, libglib, bytestring
 
+    #IMHO
     uppercase(s::Symbol) = symbol(uppercase(string(s)))
+    lowercase(s::Symbol) = symbol(lowercase(string(s)))
+
     # gimport interface (not final in any way)
     export @gimport
 
-    export GINamespace
+    export GINamespace 
     export extract_type, ensure_name, ensure_method
 
     include(joinpath("..","deps","ext.jl"))

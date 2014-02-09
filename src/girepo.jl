@@ -37,6 +37,7 @@ const GIInfoTypes = Dict{Symbol, Type}()
 for (i,itype) in enumerate(GIInfoTypesShortNames)
     let lowername = symbol(lowercase(string(itype)))
         @eval typealias $(GIInfoTypeNames[i]) GIInfo{$(i-1)}
+        @eval export $(GIInfoTypeNames[i])
         GIInfoTypes[lowername] = GIInfo{i-1}
     end
 end
@@ -44,6 +45,7 @@ end
 typealias GICallableInfo Union(GIFunctionInfo,GIVFuncInfo, GICallbackInfo, GISignalInfo)
 typealias GIEnumOrFlags Union(GIEnumInfo,GIFlagsInfo)
 typealias GIRegisteredTypeInfo Union(GIEnumOrFlags,GIInterfaceInfo, GIObjectInfo, GIStructInfo, GIUnionInfo)
+export GICallbackInfo, GIEnumOrFlags, GIRegisteredTypeInfo
 
 show{Typeid}(io::IO, ::Type{GIInfo{Typeid}}) = print(io, GIInfoTypeNames[Typeid+1])
 
@@ -241,9 +243,15 @@ const TAG_BASIC_MAX = 13
 const TAG_ARRAY = 15
 const TAG_INTERFACE = 16 
 
-extract_type(info::Union(GIArgInfo,GIConstantInfo),iface=false) = extract_type(get_type(info),iface)
+#we want to separate the description of types from actual generation of code, which may depend on context
+# e g it should be possible to only generate methods, assuming concrete types already been supplied by someone else
+abstract GIIfaceType{ns,name,kind}
+# kind = :Object, :Interface, :Struct, :Opaque
+abstract GIEnumType{ns, name, isflags}
 
-function extract_type(info::GITypeInfo,iface=false)
+extract_type(info::Union(GIArgInfo,GIConstantInfo)) = extract_type(get_type(info))
+
+function extract_type(info::GITypeInfo)
     tag = get_tag(info)
     if tag <= TAG_BASIC_MAX
         basetype = typetag_primitive[tag+1]
@@ -265,13 +273,13 @@ function extract_type(info::GITypeInfo,iface=false)
     end
 end
 
-abstract GStruct #placeholder
-function extract_type(info::GIStructInfo,ret) 
-    GStruct # TODO: specialize
-end
+ifacetype(kind,info) = GIIfaceType{get_ns(info),get_name(info),
+extract_type(info::GIStructInfo) = ifacetype(:Struct,info)
+extract_type(info::GIObjectInfo) = ifacetype(:Object,info)
+extract_type(info::GIInterfaceInfo) = ifacetype(:Interface,info)
 
-extract_type(info::GIEnumOrFlags,ret) = Enum 
-extract_type(info::GIInterfaceInfo,ret) = GObjectI #FIXME 
+extract_type(info::GIEnumInfo) = GIEnumType{get_ns(info),get_name(info),false}
+extract_type(info::GIFlagsInfo) = GIEnumType{get_ns(info),get_name(info),true}
 
 function get_value(info::GIConstantInfo)
     typ = extract_type(info)

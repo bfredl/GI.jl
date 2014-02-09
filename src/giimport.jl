@@ -1,5 +1,24 @@
 #TODO: completely separate code-generation and dyn-importing/caching mechanism
 #      make generated code export-clean (no `:($(TypeName))` )
+
+
+abstract GenerationContext
+
+typealias Type GIType
+
+# dynamic context: code is generated for immediate use
+# types are concretized on-the-fly as needed
+type DynamicContext < GenerationContext
+    typemap::Dict{GIType,Type}
+end
+
+# cache context, only generate exactly what specified
+type CachedContext < GenerationContext
+    usedTypes::Set{GIType}
+    typemap::Dict{Type,Symbol}
+end
+
+
 const _gi_modules = Dict{Symbol,Module}()
 
 #we will get rid of this one:
