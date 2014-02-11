@@ -290,7 +290,7 @@ function get_value(info::GIConstantInfo)
 end
 
 function get_consts(gns)
-    consts = Dict{Symbol,Any}() # presently Union(Number,ByteString)
+    consts = (Symbol,Any)[]
     for c in get_all(gns,GIConstantInfo)
         name = get_name(c)
         if !ismatch(r"^[a-zA-Z_]",string(name))
@@ -298,7 +298,7 @@ function get_consts(gns)
         end
         val = get_value(c)
         if val != nothing
-            consts[name] = val
+            push!(consts, (name,val))
         end
     end
     consts
