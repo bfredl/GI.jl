@@ -13,7 +13,7 @@ args = GI.get_args(wmove)
 
 argx = args[1]
 @assert GI.get_name(argx) == :x
-@assert GI.extract_type(argx) == Int32
+@assert GI.get_base_type(GI.get_type(argx)) == Int32
 
 GI.ensure_name(gtk, :Window)
 GI.ensure_method(gtk, :Window, :move)

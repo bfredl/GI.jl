@@ -241,40 +241,31 @@ const TAG_BASIC_MAX = 13
 const TAG_ARRAY = 15
 const TAG_INTERFACE = 16 
 
-extract_type(info::Union(GIArgInfo,GIConstantInfo),iface=false) = extract_type(get_type(info),iface)
 
-function extract_type(info::GITypeInfo,iface=false)
+abstract GArrayType{kind}
+const GI_ARRAY_TYPE_C = 0
+const GI_ARRAY_TYPE_ARRAY = 1
+const GI_ARRAY_TYPE_PTR_ARRAY = 2
+const GI_ARRAY_TYPE_BYTE_ARRAY =3
+
+get_base_type(info::GIConstantInfo) = get_base_type(get_type(info))
+function get_base_type(info::GITypeInfo) 
     tag = get_tag(info)
     if tag <= TAG_BASIC_MAX
-        basetype = typetag_primitive[tag+1]
+        typetag_primitive[tag+1]
     elseif tag == TAG_INTERFACE
         # Object Types n such
-        typ = get_interface(info)
-        basetype = extract_type(typ,iface)
+        get_interface(info)
     elseif tag == TAG_ARRAY
-        basetype = Void
+        None #GArrayType{get_array_type(info)}
     else
         print(tag)
         return Nothing
     end
-    # GObjects are implicit pointers
-    if is_pointer(info) && (!(basetype <: Union(GObjectI,ByteString))  || basetype == Void)
-        Ptr{basetype}
-    else
-        basetype
-    end
 end
-
-abstract GStruct #placeholder
-function extract_type(info::GIStructInfo,ret) 
-    GStruct # TODO: specialize
-end
-
-extract_type(info::GIEnumOrFlags,ret) = Enum 
-extract_type(info::GIInterfaceInfo,ret) = GObjectI #FIXME 
 
 function get_value(info::GIConstantInfo)
-    typ = extract_type(info)
+    typ = get_base_type(info)
     x = Array(Int64,1) #or mutable
     size = ccall((:g_constant_info_get_value,libgi),Cint,(Ptr{GIBaseInfo}, Ptr{Void}), info, x) 
     if typ <: Number

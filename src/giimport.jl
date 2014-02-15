@@ -20,8 +20,13 @@ function get_ns(name::Symbol)
     for path=get_shlibs(gns) 
         dlopen(path,RTLD_GLOBAL) 
     end
-    decs = const_decls(gns)
-    append!(decs, enum_decls(gns))
+    decs = Expr[ Expr(:using, :., :., :GI, :_AllTypes) ]
+    append!(decs, const_decls(gns))
+    (enumdecs, aliases) = enum_decls(gns)
+    for d in enumdecs
+        eval(_AllTypes, d)
+    end
+    append!(decs, aliases)
     push!(decs, :( const GI = $GI; const __ns = $gns ) )
     objs = get_all(gns, GIObjectInfo)
     for obj in objs
@@ -60,11 +65,19 @@ function const_decls(ns,fmt)
     decs
 end
 
-enum_decls(ns) = enum_decls(ns,x->x)
-function enum_decls(ns,fmt)
+function enum_decls(ns)
     enums = get_all(ns, GIEnumOrFlags)
-    [enum_decl(enum,fmt(get_name(enum))) for enum in enums]
+    typedefs = Expr[]
+    aliases = Expr[]
+    for enum in enums 
+        name = get_name(enum)
+        longname = enum_name(enum)
+        push!(typedefs,enum_decl(enum,longname))
+        push!(aliases, :( const $name = _AllTypes.$longname))
+    end
+    (typedefs,aliases)
 end
+enum_name(enum) = symbol(string(get_namespace(enum),get_name(enum)))
 
 
 ensure_name(ns::GINamespace, name) = ensure_name(get_ns(ns.name), name)
@@ -79,11 +92,19 @@ function ensure_name(mod::Module, name::Symbol)
 end
 
 
+#rename me: I am the general context of all dynamically generated code
 module _AllTypes
     import GI
-    import Gtk.GLib
-    const GObject = GLib.GObject
+    import Gtk
+    using Gtk.GLib
+
+    function enum_get(enum, sym::Symbol) 
+        enum.(sym)
+    end
+    enum_get(enum, int::Integer) = int
+    export enum_get
     # temporary solution, the @type_decl should go right into the generated module
+    # and then aliased in here
     function ensure_type(info::GI.GIObjectInfo)
         g_type = GI.get_g_type(info)
         name = symbol(GLib.g_type_name(g_type))
@@ -96,6 +117,7 @@ module _AllTypes
             
         @eval @GLib.Gtype_decl $name $g_type (
             g_type(::Type{$(esc(name))}) = esc(get_g_type)($info) )
+        eval(Expr(:toplevel, Expr(:export, name, symbol(string(name,"I")))))
         name
     end
 end
@@ -121,21 +143,12 @@ function load_name(mod,ns,name::Symbol,info::GIInterfaceInfo)
 end
 
 function load_name(mod,ns,name,info::GIFunctionInfo)
-    create_method(info)
+    fun = create_method(info)
+    eval(mod,fun)
 end
 
 peval(mod, expr) = (print(expr,'\n'); eval(mod,expr))
 
-function extract_type(info::GIObjectInfo,iface=false) 
-    gname = ensure_type(info)
-    iface ? GLib.gtype_ifaces[gname] : GLib.gtype_wrappers[gname]
-end
-
-function extract_type(info::GIInterfaceInfo,iface=false) 
-    # not sure the best way to implement this given no multiple inheritance
-    # maybe clutter_container_add_actor should become container_add_actor
-    GObjectI #FIXME 
-end
 
 const _gi_methods = Dict{(Symbol,Symbol,Symbol),Any}()
 ensure_method(mod::Module, rtype, method) = ensure_method(mod.__ns,rtype,method)
@@ -147,26 +160,93 @@ function ensure_method(ns::GINamespace, rtype::Symbol, method::Symbol)
         return _gi_methods[qname]
     end
     info = ns[rtype][method]
-    meth = create_method(info)
+    expr = create_method(info)
+    meth =  eval(_AllTypes,expr)
     _gi_methods[qname] = meth
     return meth
 end
-    
-c_type(t) = t
-c_type{T<:GObjectI}(t::Type{T}) = Ptr{GObjectI}
-c_type{T<:ByteString}(t::Type{T}) = Ptr{Uint8}
-c_type(t::Type{None}) = Void
 
-j_type(t) = t
-j_type{T<:Integer}(::Type{T}) = Integer
-j_type(::Type{Ptr{GStruct}}) = Mutable #FIXME
+abstract InstanceType
+is_pointer(::Type{InstanceType}) = true
+typealias TypeInfo Union(GITypeInfo,Type{InstanceType})
+    
+immutable TypeDesc{T}
+    gitype::T
+    jtype
+    ctype
+end
+
+extract_type(info::GIArgInfo) = extract_type(get_type(info))
+function extract_type(info::GITypeInfo) 
+    base_type = get_base_type(info)
+    extract_type(info,base_type)
+end
+
+function extract_type(info::GITypeInfo, basetype::Type) 
+    typ = symbol(string(basetype))
+    if is_pointer(info)
+        typ = :(Ptr{$typ})
+    end
+    TypeDesc(basetype,:Any,typ)
+end
+
+function extract_type(info::GITypeInfo, basetype::Type{ByteString})
+    @assert is_pointer(info)
+    TypeDesc{Type{ByteString}}(ByteString,:Any,:(Ptr{Uint8}))
+end
+        
+abstract GStruct #placeholder
+function extract_type(typeinfo::TypeInfo, info::GIStructInfo,ret) 
+    @assert is_pointer(typeinfo)
+    TypeDesc(info,:Any,:(Ptr{Void}))
+end
+
+function extract_type(typeinfo::GITypeInfo,info::GIEnumOrFlags) 
+    TypeDesc(info,:Any, :Enum)
+end
+
+function extract_type(typeinfo::TypeInfo, info::GIObjectInfo)
+    gname = ensure_type(info)
+    @assert is_pointer(typeinfo)
+    # dynamic ? GLib.gtype_ifaces[gname] : symbol(gname)
+    TypeDesc(info,symbol(string(gname,"I")),:(Ptr{GObjectI}))
+end
+
+function extract_type(typeinfo::TypeInfo, info::GIInterfaceInfo)
+    # not sure the best way to implement this given no multiple inheritance
+    # maybe clutter_container_add_actor should become container_add_actor
+    @assert is_pointer(typeinfo)
+    symbol(GObjectI) #FIXME 
+    TypeDesc(info,:GObjectI,:(Ptr{GObjectI}))
+end
+
+#this should only be used for stuff that's hard to implement as cconvert
+function convert_to_c(name::Symbol, info::GIArgInfo, ti::TypeDesc) 
+    nothing
+end
+function convert_to_c{T<:GIEnumOrFlags}(argname::Symbol, info::GIArgInfo, ti::TypeDesc{T})
+    :( enum_get($(enum_name(ti.gitype)),$argname) ) 
+end
+
+#pretend that CallableInfo is a ArgInfo describing the return value
+typealias ArgInfo Union(GIArgInfo,GICallableInfo)
+get_ownership_transfer(ai::GICallableInfo) = get_caller_owns(ai)
+may_be_null(ai::GICallableInfo) = may_return_null(ai)
+function convert_from_c{T}(argname::Symbol, arginfo::ArgInfo, ti::TypeDesc{T}) 
+    if ti.jtype != :Any
+        :(convert($(ti.jtype), $argname))
+    else
+        nothing
+    end
+end
+function convert_from_c(name::Symbol, arginfo::ArgInfo, typeinfo::TypeDesc{Type{ByteString}}) 
+    owns = get_ownership_transfer(arginfo) != TRANSFER_NOTHING
+    expr = :( ($name == C_NULL) ? nothing : GLib.bytestring($name, $owns))
+end
 
 immutable Arg
     name::Symbol
-    typ::Type
-    owns::Bool #true: we should free the string/etc
-    maybenull::Bool
-    Arg(nam,typ,owns=false,maybe=false) = new(nam,typ,owns,maybe)
+    typ
 end
 types(args::Array{Arg}) = [a.typ for a in args]
 names(args::Array{Arg}) = [a.name for a in args]
@@ -201,82 +281,81 @@ function create_method(info::GIFunctionInfo)
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
-    prelude = Any[]
+    prologue = Any[]
     epilogue = Any[]
-    retvals = Arg[]
+    retvals = Symbol[]
     cargs = Arg[]
     jargs = Arg[]
     if flags & IS_METHOD != 0
         object = get_container(info)
-        iface = extract_type(object,true)
-        push!(jargs, Arg(:instance, iface))
-        push!(cargs, Arg(:instance, c_type(iface)))
+        typeinfo = extract_type(InstanceType,object)
+        push!(jargs, Arg(:instance, typeinfo.jtype))
+        push!(cargs, Arg(:instance, typeinfo.ctype))
     end
     if flags & IS_CONSTRUCTOR != 0
         name = symbol("$(get_name(get_container(info)))_$name")
     end
-    rettype = extract_type(get_return_type(info),true)
-    if rettype != None
-        owns = get_caller_owns(info) != TRANSFER_NOTHING
-        maybe = may_return_null(info)
-        if rettype == ByteString
-            maybe = true # seems that Girepository lies to us
+    rettype = extract_type(get_return_type(info))
+    if rettype.ctype != :None
+        expr = convert_from_c(:ret,info,rettype)
+        if expr != nothing
+            push!(epilogue, :(ret = $expr))
         end
-
-        push!(retvals,Arg(:ret, rettype, owns, maybe))
+        push!(retvals,:ret)
     end
     for arg in get_args(info)
         aname = symbol("_$(get_name(arg))")
-        typ = extract_type(arg,true)
+        typ = extract_type(arg)
         dir = get_direction(arg)
-        owns = get_ownership_transfer(arg) != TRANSFER_NOTHING
-        maybenull = may_be_null(arg)
-        if dir == DIRECTION_IN
-            push!(jargs, Arg(aname, j_type(typ)))
-            push!(cargs, Arg(aname, c_type(typ)))
-        else
-            ctyp = c_type(typ)
-            wname = symbol("m_$(get_name(arg))")
-            push!(prelude, :( $wname = GI.mutable($ctyp) ))
-            if dir == DIRECTION_INOUT
-                push!(jargs, Arg( aname, j_type(typ)))
-                push!(prelude, :( $wname[] = Base.cconvert($ctyp,$aname) ))
+        if dir != DIRECTION_OUT
+            expr = convert_to_c(aname,arg,typ)
+            if expr != nothing
+                push!(prologue, :($aname = $expr))
             end
-            push!(cargs, Arg(wname, Ptr{ctyp}))
+        end
+
+        if dir == DIRECTION_IN
+            push!(jargs, Arg(aname, typ.jtype))
+            push!(cargs, Arg(aname, typ.ctype))
+        else
+            ctype = typ.ctype
+            wname = symbol("m_$(get_name(arg))")
+            push!(prologue, :( $wname = GI.mutable($ctype) ))
+            if dir == DIRECTION_INOUT
+                push!(jargs, Arg( aname, typ.jtype))
+                push!(prologue, :( $wname[] = Base.cconvert($ctype,$aname) ))
+            end
+            push!(cargs, Arg(wname, :(Ptr{$ctype})))
             push!(epilogue,:( $aname = $wname[] ))
-            push!(retvals, Arg( aname, typ, owns, maybenull))
+            expr = convert_from_c(aname,arg,typ)
+            if expr != nothing
+                push!(epilogue, :($aname = $expr))
+            end
+            push!(retvals, aname)
         end
     end
     if flags & THROWS != 0
-        push!(prelude, :( err = GI.err_buf() ))
-        push!(cargs, Arg(:err, Ptr{Ptr{GI.GError}}))
+        push!(prologue, :( err = GI.err_buf() ))
+        push!(cargs, Arg(:err, :(Ptr{Ptr{GError}})))
         unshift!(epilogue, :( GI.check_err(err) ))
     end
 
     symb = get_symbol(info)
     j_call = Expr(:call, name, jparams(jargs)... )
-    c_call = :( ret = $(make_ccall(string(symb), c_type(rettype), cargs)))
-    for r in retvals
-        nam = r.name
-        @assert r.typ !== None
-        ctype = c_type(r.typ)
-        rtype = r.maybenull ? Maybe(r.typ) : r.typ
-        # unneccesary if, but makes generated wrappers easier to inspect
-        if rtype != ctype
-            push!(epilogue,:( $nam = GI.rconvert($rtype,$nam,$(r.owns) )))
-        end
-    end
+    c_call = :( ret = $(make_ccall(string(symb), rettype.ctype, cargs)))
     if length(retvals) > 1
-        retstmt = Expr(:tuple, names(retvals)...)
+        retstmt = Expr(:tuple, retvals...)
     elseif length(retvals) ==1 
-        retstmt = retvals[].name
+        retstmt = retvals[]
     else
-        retstmt = nothing
+        retstmt = :nothing
     end
     blk = Expr(:block)
-    blk.args = [ prelude, c_call, epilogue, retstmt ]
-    peval(NS, Expr(:function, j_call, blk))
-    return eval(NS, name)
+    blk.args = [ prologue, c_call, epilogue, retstmt ]
+    fun = Expr(:function, j_call, blk)
+    println(fun)
+    fun
+
 end
     
 #convenience macro for testing 
@@ -307,7 +386,7 @@ macro gimport(ns, names)
             push!(q.args, :(const $(esc(symbol("$(name)_new"))) = $(GI.ensure_method(NS, name, :new))))
         end
     end
-    #print(q)
+    println(q)
     q
 end
 
