@@ -196,13 +196,17 @@ function extract_type(info::GITypeInfo, basetype::Type{ByteString})
 end
         
 abstract GStruct #placeholder
-function extract_type(typeinfo::TypeInfo, info::GIStructInfo,ret) 
-    @assert is_pointer(typeinfo)
+function extract_type(typeinfo::TypeInfo, info::GIStructInfo) 
+    #FIXME: not neccesarily pointer!
     TypeDesc(info,:Any,:(Ptr{Void}))
 end
 
 function extract_type(typeinfo::GITypeInfo,info::GIEnumOrFlags) 
     TypeDesc(info,:Any, :Enum)
+end
+
+function extract_type(typeinfo::GITypeInfo,info::GICallbackInfo) 
+    TypeDesc(info,:Any, :(Ptr{Void}))
 end
 
 function extract_type(typeinfo::TypeInfo, info::GIObjectInfo)

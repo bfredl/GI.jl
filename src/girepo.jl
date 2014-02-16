@@ -57,25 +57,30 @@ show(io::IO, info::GIArgInfo) = print(io,"GIArgInfo(:$(get_name(info)),$(extract
 showcompact(io::IO, info::GIArgInfo) = show(io,info) # bug in show.jl ?
 
 function show(io::IO, info::GIFunctionInfo) 
-    print(io, "$(get_namespace(info)).$(get_name(info))(")
+    print(io, "$(get_namespace(info)).") 
     flags = get_flags(info)
+    if flags & (IS_CONSTRUCTOR | IS_METHOD) != 0
+        cls = get_container(info)
+        print(io, "$(get_name(cls)).")
+    end
+    print(io,"$(get_name(info))(")
     for arg in get_args(info)
+        print(io, "$(get_name(arg))::")
+        show(io, get_type(arg))
         dir = get_direction(arg)
-        typ = string(extract_type(arg))
         alloc = is_caller_allocates(arg)
         if dir == DIRECTION_OUT
-            typ = "OUT{$typ,$alloc}"
+            print(io, " OUT($alloc)")
         elseif dir == DIRECTION_INOUT
-            typ = "INOUT{$typ}"
+            print(io, " INOUT")
         end
-        print(io, "$(get_name(arg))::$typ, ")
+        print(io, ", ")
     end
-    rettyp = extract_type(get_return_type(info))
-    print(io,")::$rettyp")
+    print(io,")::") 
+    show(io, get_return_type(info))
     if flags & THROWS != 0
         print(io, " THROWS")
     end
-    print(io, "\n")
 
 end
 
@@ -194,11 +199,12 @@ ctypes = [GIInfo=>Ptr{GIBaseInfo},
           Symbol=>Ptr{Uint8}]
 for (owner,property,typ) in [
     (:base, :name, Symbol), (:base, :namespace, Symbol),
-    (:base, :container, GIInfo), (:registered_type, :g_type, GType), (:object, :parent, MaybeGIInfo),
+    (:base, :container, MaybeGIInfo), (:registered_type, :g_type, GType), (:object, :parent, MaybeGIInfo),
     (:callable, :return_type, GIInfo), (:callable, :caller_owns, Enum),
     (:function, :flags, Enum), (:function, :symbol, Symbol),
     (:arg, :type, GIInfo), (:arg, :direction, Enum), (:arg, :ownership_transfer, Enum),
-    (:type, :tag, Enum), (:type, :interface, GIInfo), (:constant, :type, GIInfo), 
+    (:type, :tag, Enum), (:type, :interface, GIInfo), (:type, :array_type, Enum), 
+    (:type, :array_length, Cint), (:type, :array_fixed_size, Cint), (:constant, :type, GIInfo), 
     (:value, :value, Int64) ]
 
     ctype = get(ctypes, typ, typ)
@@ -210,10 +216,11 @@ end
 get_name(info::GITypeInfo) = symbol("<gtype>")
 get_name(info::GIInvalidInfo) = symbol("<INVALID>")
 
+get_param_type(info::GITypeInfo,n) = rconvert(MaybeGIInfo, ccall(("g_type_info_get_param_type", libgi), Ptr{GIBaseInfo}, (Ptr{GIBaseInfo}, Cint), info, n))
 
 qual_name(info::GIRegisteredTypeInfo) = (get_namespace(info),get_name(info))
 
-for (owner,flag) in [ (:type, :is_pointer), (:callable, :may_return_null), (:arg, :is_caller_allocates), (:arg, :may_be_null) ]
+for (owner,flag) in [ (:type, :is_pointer), (:callable, :may_return_null), (:arg, :is_caller_allocates), (:arg, :may_be_null), (:type, :is_zero_terminated) ]
     @eval function $flag(info::$(GIInfoTypes[owner]))
         ret = ccall(($("g_$(owner)_info_$(flag)"), libgi), Cint, (Ptr{GIBaseInfo},), info)
         return ret != 0
@@ -240,9 +247,11 @@ const typetag_primitive = [
 const TAG_BASIC_MAX = 13
 const TAG_ARRAY = 15
 const TAG_INTERFACE = 16 
+const TAG_GLIST = 17 
+const TAG_GSLIST = 18 
 
 
-abstract GArrayType{kind}
+abstract GIArrayType{kind}
 const GI_ARRAY_TYPE_C = 0
 const GI_ARRAY_TYPE_ARRAY = 1
 const GI_ARRAY_TYPE_PTR_ARRAY = 2
@@ -257,10 +266,48 @@ function get_base_type(info::GITypeInfo)
         # Object Types n such
         get_interface(info)
     elseif tag == TAG_ARRAY
-        None #GArrayType{get_array_type(info)}
+        GIArrayType{int(get_array_type(info))}
+    elseif tag == TAG_GLIST
+        GLib._GSList
+    elseif tag == TAG_GSLIST
+        GLib._GList
     else
         print(tag)
         return Nothing
+    end
+end
+
+function show(io::IO,info::GITypeInfo) 
+    bt = get_base_type(info)
+    if is_pointer(info)
+        print(io,"Ptr{")
+    end
+    if isa(bt,Type) && bt <: GIArrayType && bt != None
+        zero = is_zero_terminated(info)
+        print(io,"$bt($zero,")
+        fs = get_array_fixed_size(info)
+        len = get_array_length(info)
+        if fs >= 0 
+            show(io, fs)
+        elseif len >= 0
+            call = get_container(get_container(info))
+            arg = get_args(call)[len+1]
+            show(io, get_name(arg))
+        end
+        print(io,", ")
+        param = get_param_type(info,0)
+        show(io,param)
+        print(io,")")
+    elseif isa(bt,Type) && bt <: GLib._LList && bt != None
+        print(io,"$bt{")
+        param = get_param_type(info,0)
+        show(io,param)
+        print(io,"}")
+    else
+        print(io,bt)
+    end
+    if is_pointer(info)
+        print(io,"}")
     end
 end
 
