@@ -9,13 +9,14 @@ end
 
 for f in fs 
     lustig = false # whatever we happen to unsupport
-    for arg in GI.get_args(f)
+    for arg in [GI.get_args(f), f] # f is return value
         bt = GI.get_base_type(GI.get_type(arg))
-        if isa(bt,Type) && bt <: Union(GI.GIArrayType, GLib._LList) && bt != None
+        if isa(bt,Type) && bt <: Union(GLib._LList) && bt != None
             lustig = true; break
         end
     end
     if lustig
         println(f)
+        GI.create_method(f)
     end
 end

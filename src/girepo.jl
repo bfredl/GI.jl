@@ -141,7 +141,7 @@ end
 function get_shlibs(ns)
     names = ccall((:g_irepository_get_shared_library, libgi), Ptr{Uint8}, (Ptr{GIRepository}, Ptr{Uint8}), girepo, ns)
     if names != C_NULL
-        split(bytestring(names),",")
+        [bytestring(s) for s in split(bytestring(names),",")]
     else
         String[]
     end
@@ -218,6 +218,12 @@ get_name(info::GIInvalidInfo) = symbol("<INVALID>")
 
 get_param_type(info::GITypeInfo,n) = rconvert(MaybeGIInfo, ccall(("g_type_info_get_param_type", libgi), Ptr{GIBaseInfo}, (Ptr{GIBaseInfo}, Cint), info, n))
 
+#pretend that CallableInfo is a ArgInfo describing the return value
+typealias ArgInfo Union(GIArgInfo,GICallableInfo)
+get_ownership_transfer(ai::GICallableInfo) = get_caller_owns(ai)
+may_be_null(ai::GICallableInfo) = may_return_null(ai)
+get_type(ai::GICallableInfo) = get_return_type(ai)
+
 qual_name(info::GIRegisteredTypeInfo) = (get_namespace(info),get_name(info))
 
 for (owner,flag) in [ (:type, :is_pointer), (:callable, :may_return_null), (:arg, :is_caller_allocates), (:arg, :may_be_null), (:type, :is_zero_terminated) ]
@@ -245,6 +251,7 @@ const typetag_primitive = [
     ByteString
     ]
 const TAG_BASIC_MAX = 13
+const TAG_FILENAME = 14
 const TAG_ARRAY = 15
 const TAG_INTERFACE = 16 
 const TAG_GLIST = 17 
@@ -256,6 +263,7 @@ const GI_ARRAY_TYPE_C = 0
 const GI_ARRAY_TYPE_ARRAY = 1
 const GI_ARRAY_TYPE_PTR_ARRAY = 2
 const GI_ARRAY_TYPE_BYTE_ARRAY =3
+typealias GICArray GIArrayType{GI_ARRAY_TYPE_C}
 
 get_base_type(info::GIConstantInfo) = get_base_type(get_type(info))
 function get_base_type(info::GITypeInfo) 
@@ -271,11 +279,17 @@ function get_base_type(info::GITypeInfo)
         GLib._GSList
     elseif tag == TAG_GSLIST
         GLib._GList
+    elseif tag == TAG_FILENAME
+        ByteString #FIXME: on funky platforms this may not be utf8/ascii
     else
         print(tag)
         return Nothing
     end
 end
+
+get_call(info::GITypeInfo) = get_call(get_container(info))
+get_call(info::GIArgInfo) = get_container(info)
+get_call(info::GICallableInfo) = info
 
 function show(io::IO,info::GITypeInfo) 
     bt = get_base_type(info)
@@ -290,7 +304,7 @@ function show(io::IO,info::GITypeInfo)
         if fs >= 0 
             show(io, fs)
         elseif len >= 0
-            call = get_container(get_container(info))
+            call = get_call(info)
             arg = get_args(call)[len+1]
             show(io, get_name(arg))
         end

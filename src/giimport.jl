@@ -20,7 +20,7 @@ function get_ns(name::Symbol)
     for path=get_shlibs(gns) 
         dlopen(path,RTLD_GLOBAL) 
     end
-    decs = Expr[ Expr(:using, :., :., :GI, :_AllTypes) ]
+    decs = Expr[ Expr(:using, :., :., :GI, :_AllTypes), Expr(:using, :Gtk, :GLib) ]
     append!(decs, const_decls(gns))
     (enumdecs, aliases) = enum_decls(gns)
     for d in enumdecs
@@ -190,9 +190,16 @@ function extract_type(info::GITypeInfo, basetype::Type)
     TypeDesc(basetype,:Any,typ)
 end
 
+#  T<:SomeType likes to steal this:
+extract_type(info::GITypeInfo, basetype::Type{None}) = TypeDesc(None, :Any, :None)
+
 function extract_type(info::GITypeInfo, basetype::Type{ByteString})
     @assert is_pointer(info)
     TypeDesc{Type{ByteString}}(ByteString,:Any,:(Ptr{Uint8}))
+end
+function convert_from_c(name::Symbol, arginfo::ArgInfo, typeinfo::TypeDesc{Type{ByteString}}) 
+    owns = get_ownership_transfer(arginfo) != TRANSFER_NOTHING
+    expr = :( ($name == C_NULL) ? nothing : GLib.bytestring($name, $owns))
 end
         
 abstract GStruct #placeholder
@@ -201,51 +208,66 @@ function extract_type(typeinfo::TypeInfo, info::GIStructInfo)
     TypeDesc(info,:Any,:(Ptr{Void}))
 end
 
-function extract_type(typeinfo::GITypeInfo,info::GIEnumOrFlags) 
-    TypeDesc(info,:Any, :Enum)
+extract_type(typeinfo::GITypeInfo,info::GIEnumOrFlags) = TypeDesc(info,:Any, :Enum)
+function convert_to_c{T<:GIEnumOrFlags}(argname::Symbol, info::GIArgInfo, ti::TypeDesc{T})
+    :( enum_get($(enum_name(ti.gitype)),$argname) ) 
+end
+
+function extract_type(typeinfo::GITypeInfo,info::Type{GICArray}) 
+    @assert is_pointer(typeinfo)
+    #elm = get_param_type(typeinfo,0)
+    #TODO: something more intresting
+    TypeDesc(typeinfo,:Any, :(Ptr{Void}))
+end
+
+function extract_type{T<:GLib._LList}(typeinfo::GITypeInfo,listtype::Type{T}) 
+    @assert is_pointer(typeinfo)
+    elm = get_param_type(typeinfo,0)
+    elmtype = extract_type(elm).ctype
+    lt = listtype == GLib._GSList ? :(GLib._GSList) : :(GLib._GList) 
+    TypeDesc{Type{GList}}(GList, :(GLib.LList{$lt{$elmtype}}), :(Ptr{$lt{$elmtype}}))
+end
+function convert_from_c(name::Symbol, arginfo::ArgInfo, typeinfo::TypeDesc{Type{GList}}) 
+    #owns = get_ownership_transfer(arginfo) != TRANSFER_NOTHING
+    expr = :( GLib.GList($name) )
 end
 
 function extract_type(typeinfo::GITypeInfo,info::GICallbackInfo) 
     TypeDesc(info,:Any, :(Ptr{Void}))
 end
 
-function extract_type(typeinfo::TypeInfo, info::GIObjectInfo)
+typealias ObjectLike Union(GIObjectInfo, GIInterfaceInfo)
+
+function typename(info::GIObjectInfo) 
     gname = ensure_type(info)
-    @assert is_pointer(typeinfo)
-    # dynamic ? GLib.gtype_ifaces[gname] : symbol(gname)
-    TypeDesc(info,symbol(string(gname,"I")),:(Ptr{GObjectI}))
+    symbol(string(gname,"I"))
 end
 
-function extract_type(typeinfo::TypeInfo, info::GIInterfaceInfo)
-    # not sure the best way to implement this given no multiple inheritance
-    # maybe clutter_container_add_actor should become container_add_actor
-    @assert is_pointer(typeinfo)
-    symbol(GObjectI) #FIXME 
-    TypeDesc(info,:GObjectI,:(Ptr{GObjectI}))
+# not sure the best way to implement this given no multiple inheritance
+# maybe clutter_container_add_actor should become container_add_actor
+typename(info::GIInterfaceInfo) = :GObjectI #FIXME
+
+function extract_type(typeinfo::TypeInfo, info::ObjectLike)
+    # dynamic ? GLib.gtype_ifaces[gname] : symbol(gname)
+    if is_pointer(typeinfo)
+        TypeDesc(info,typename(info),:(Ptr{GObjectI}))
+    else
+        # a GList has implicitly pointers to all elements
+        TypeDesc(info,:INVALID,:GObjectI)
+    end
 end
 
 #this should only be used for stuff that's hard to implement as cconvert
 function convert_to_c(name::Symbol, info::GIArgInfo, ti::TypeDesc) 
     nothing
 end
-function convert_to_c{T<:GIEnumOrFlags}(argname::Symbol, info::GIArgInfo, ti::TypeDesc{T})
-    :( enum_get($(enum_name(ti.gitype)),$argname) ) 
-end
 
-#pretend that CallableInfo is a ArgInfo describing the return value
-typealias ArgInfo Union(GIArgInfo,GICallableInfo)
-get_ownership_transfer(ai::GICallableInfo) = get_caller_owns(ai)
-may_be_null(ai::GICallableInfo) = may_return_null(ai)
 function convert_from_c{T}(argname::Symbol, arginfo::ArgInfo, ti::TypeDesc{T}) 
     if ti.jtype != :Any
         :(convert($(ti.jtype), $argname))
     else
         nothing
     end
-end
-function convert_from_c(name::Symbol, arginfo::ArgInfo, typeinfo::TypeDesc{Type{ByteString}}) 
-    owns = get_ownership_transfer(arginfo) != TRANSFER_NOTHING
-    expr = :( ($name == C_NULL) ? nothing : GLib.bytestring($name, $owns))
 end
 
 immutable Arg
@@ -254,7 +276,7 @@ immutable Arg
 end
 types(args::Array{Arg}) = [a.typ for a in args]
 names(args::Array{Arg}) = [a.name for a in args]
-jparams(args::Array{Arg}) = [:($(a.name)::$(a.typ)) for a in args]
+jparams(args::Array{Arg}) = [a.typ != :Any ? :($(a.name)::$(a.typ)) : a.name for a in args]
 #there's probably a better way
 function make_ccall(id, rtype, args) 
     argtypes = Expr(:tuple, types(args)...)
@@ -281,7 +303,6 @@ end
 # (or maybe just jit-compile-time macros) 
 # this could be simplified significantly
 function create_method(info::GIFunctionInfo)
-    NS = get_ns(get_namespace(info))
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
@@ -312,6 +333,7 @@ function create_method(info::GIFunctionInfo)
         typ = extract_type(arg)
         dir = get_direction(arg)
         if dir != DIRECTION_OUT
+            push!(jargs, Arg( aname, typ.jtype))
             expr = convert_to_c(aname,arg,typ)
             if expr != nothing
                 push!(prologue, :($aname = $expr))
@@ -319,14 +341,12 @@ function create_method(info::GIFunctionInfo)
         end
 
         if dir == DIRECTION_IN
-            push!(jargs, Arg(aname, typ.jtype))
             push!(cargs, Arg(aname, typ.ctype))
         else
             ctype = typ.ctype
             wname = symbol("m_$(get_name(arg))")
             push!(prologue, :( $wname = GI.mutable($ctype) ))
             if dir == DIRECTION_INOUT
-                push!(jargs, Arg( aname, typ.jtype))
                 push!(prologue, :( $wname[] = Base.cconvert($ctype,$aname) ))
             end
             push!(cargs, Arg(wname, :(Ptr{$ctype})))
