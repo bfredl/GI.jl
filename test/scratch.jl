@@ -14,5 +14,5 @@ G = GI.get_ns(:Gtk)
 i = g[:init]
 args = GI.get_args(i)
 a = args[2]
-GI.create_method(i)
+GI.create_method(i,GI.dynctx)
 

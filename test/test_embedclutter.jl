@@ -28,9 +28,10 @@ signal_connect(txt,"button-press-event") do actor,event
     print("clicked\n")
 end
 
-vbox = GtkBox(:v)
+vbox = @GtkBox(:v)
 push!(vbox,embed)
-push!(vbox,GtkLabel("Gtk text"))
-window = GtkWindow(vbox, "GtkClutter Test", 300, 300)
+push!(vbox,@GtkLabel("Gtk text"))
+window = @GtkWindow(vbox, "GtkClutter Test", 300, 300)
+showall(window)
 nothing
 

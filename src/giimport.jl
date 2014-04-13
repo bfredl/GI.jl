@@ -97,6 +97,9 @@ module _AllTypes
     import GI
     import Gtk
     using Gtk.GLib
+    # FIXME: I don't call this 'Leaf' right now
+    # so that it's distinguishable from Gtk.jl:s Leaf types
+    suffix = :Impl
 
     function enum_get(enum, sym::Symbol) 
         enum.(sym)
@@ -114,36 +117,60 @@ module _AllTypes
         if(isdefined(_AllTypes, name))
             return name
         end
-            
         @eval @GLib.Gtype_decl $name $g_type (
             g_type(::Type{$(esc(name))}) = esc(get_g_type)($info) )
-        eval(Expr(:toplevel, Expr(:export, name, symbol(string(name,"I")))))
+        eval(Expr(:toplevel, Expr(:export, name)))
         name
     end
 end
 # we may use `using Alltypes` to mean "import all gtypenames"
 const ensure_type = _AllTypes.ensure_type 
+
+
+type UnsupportedType <: Exception
+    typ
+end
+
+abstract GenContext
+type DynamicContext <: GenContext
+end
+type StaticContext <: GenContext
+    lookupModule
+    typeset::Set
+end
+
+# TODO: generate stuff in "_Alltypes"
+ensure_type(::DynamicContext, typ) = nothing
+
+function ensure_type(::StaticContext, typ)
+    if isdefined(lookupModule,typ) || haskey(typeset,typ)
+       return nothing 
+   else
+       throw(UnsupportedType(typ.gitype))
+   end
+end
+
+# we probably want this as a singleton
+dynctx = DynamicContext()
+
         
 function load_name(mod,ns,name::Symbol,info::GIObjectInfo)
     gname = ensure_type(info)
-    iname = symbol(string(name,"I"))
-    wrap = GLib.gtype_wrappers[gname]
-    iface = GLib.gtype_ifaces[gname]
-    eval(mod, :(const $name = $wrap))
-    eval(mod, :(const $iname = $iface))
+    itype = GLib.gtype_abstracts[gname]
+    eval(mod, :(const $name = $itype))
     if find_method(ns[name], :new) != nothing
         #ensure_type might not do this, as there will be mutual dependency
         ensure_method(ns,name,:new) 
     end
-    wrap
+    itype
 end
 
 function load_name(mod,ns,name::Symbol,info::GIInterfaceInfo)
-    GObjectI #FIXME
+    GObject #FIXME
 end
 
 function load_name(mod,ns,name,info::GIFunctionInfo)
-    fun = create_method(info)
+    fun = create_method(info,dynctx)
     eval(mod,fun)
 end
 
@@ -160,8 +187,10 @@ function ensure_method(ns::GINamespace, rtype::Symbol, method::Symbol)
         return _gi_methods[qname]
     end
     info = ns[rtype][method]
-    expr = create_method(info)
+    expr = create_method(info,dynctx)
     meth =  eval(_AllTypes,expr)
+    println(meth)
+    println(typeof(meth))
     _gi_methods[qname] = meth
     return meth
 end
@@ -202,10 +231,18 @@ function convert_from_c(name::Symbol, arginfo::ArgInfo, typeinfo::TypeDesc{Type{
     expr = :( ($name == C_NULL) ? nothing : GLib.bytestring($name, $owns))
 end
         
-abstract GStruct #placeholder
+function typename(info::GIStructInfo) 
+    g_type = GI.get_g_type(info)
+    symbol(GLib.g_type_name(g_type))
+end
 function extract_type(typeinfo::TypeInfo, info::GIStructInfo) 
-    #FIXME: not neccesarily pointer!
-    TypeDesc(info,:Any,:(Ptr{Void}))
+    name = typename(info)
+    if is_pointer(typeinfo) 
+        #TypeDesc(info,:Any,:(Ptr{$name}))
+        TypeDesc(info,:Any,:(Ptr{Void}))
+    else
+        TypeDesc(info,name,name)
+    end
 end
 
 extract_type(typeinfo::GITypeInfo,info::GIEnumOrFlags) = TypeDesc(info,:Any, :Enum)
@@ -239,21 +276,21 @@ end
 typealias ObjectLike Union(GIObjectInfo, GIInterfaceInfo)
 
 function typename(info::GIObjectInfo) 
-    gname = ensure_type(info)
-    symbol(string(gname,"I"))
+    g_type = GI.get_g_type(info)
+    symbol(GLib.g_type_name(g_type))
 end
 
 # not sure the best way to implement this given no multiple inheritance
 # maybe clutter_container_add_actor should become container_add_actor
-typename(info::GIInterfaceInfo) = :GObjectI #FIXME
+typename(info::GIInterfaceInfo) = :GObject #FIXME
 
 function extract_type(typeinfo::TypeInfo, info::ObjectLike)
     # dynamic ? GLib.gtype_ifaces[gname] : symbol(gname)
     if is_pointer(typeinfo)
-        TypeDesc(info,typename(info),:(Ptr{GObjectI}))
+        TypeDesc(info,typename(info),:(Ptr{GObject}))
     else
         # a GList has implicitly pointers to all elements
-        TypeDesc(info,:INVALID,:GObjectI)
+        TypeDesc(info,:INVALID,:GObject)
     end
 end
 
@@ -298,11 +335,10 @@ function check_err(err::Mutable{Ptr{GError}})
         error(emsg)
     end
 end
-
 # with some partial-evaluation half-magic
 # (or maybe just jit-compile-time macros) 
 # this could be simplified significantly
-function create_method(info::GIFunctionInfo)
+function create_method(info::GIFunctionInfo,ctx::GenContext)
     name = get_name(info)
     flags = get_flags(info)
     args = get_args(info)
@@ -331,6 +367,7 @@ function create_method(info::GIFunctionInfo)
     for arg in get_args(info)
         aname = symbol("_$(get_name(arg))")
         typ = extract_type(arg)
+        ensure_type(ctx,typ)
         dir = get_direction(arg)
         if dir != DIRECTION_OUT
             push!(jargs, Arg( aname, typ.jtype))
