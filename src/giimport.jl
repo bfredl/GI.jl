@@ -1,5 +1,3 @@
-#TODO: completely separate code-generation and dyn-importing/caching mechanism
-#      make generated code export-clean (no `:($(TypeName))` )
 const _gi_modules = Dict{Symbol,Module}()
 
 #we will get rid of this one:
@@ -13,6 +11,8 @@ function create_module(modname,decs)
 end
 
 function get_ns(name::Symbol)
+    #modname = name == :Gtk ? :_Gtk : name
+    modname = symbol(string(:_,name))
     if haskey(_gi_modules,name)
         return _gi_modules[name]
     end
@@ -21,21 +21,50 @@ function get_ns(name::Symbol)
         dlopen(path,RTLD_GLOBAL) 
     end
     decs = Expr[ Expr(:using, :., :., :GI, :_AllTypes), Expr(:using, :Gtk, :GLib) ]
+    alldecs = Expr(:block)
+    push!(alldecs.args, Expr(:import, :GI, modname))
+    exports = Expr(:export)
+    push!(decs, exports)
     append!(decs, const_decls(gns))
-    (enumdecs, aliases) = enum_decls(gns)
-    for d in enumdecs
-        eval(_AllTypes, d)
+    enums = get_all(gns, GIEnumOrFlags)
+    for enum in enums 
+        shortname = get_name(enum)
+        longname = enum_name(enum)
+        push!(decs,enum_decl(enum,shortname))
+        push!(alldecs.args, :( const $longname = $modname.$shortname ))
     end
-    append!(decs, aliases)
-    push!(decs, :( const GI = $GI; const __ns = $gns ) )
+    #FIXME: generated code should have no runtime dep on GIRepo
+    push!(decs, :( import GI; const __ns = GI.GINamespace($(QuoteNode(name)) )))
+
+    # FIXME: don't call this 'Leaf' right now
+    # so that it's distinguishable from Gtk.jl:s Leaf types
+    push!(decs, :( const suffix = :Impl))
+
     objs = get_all(gns, GIObjectInfo)
     for obj in objs
         if is_gobject(obj)
-            ensure_type(obj)
+            g_type = GI.get_g_type(obj)
+            oname = symbol(GLib.g_type_name(g_type))
+            #if name == :GObject
+            #    return name
+            #end
+            push!(decs, :( @GLib.Gtype_decl $oname $g_type (
+            #FIXME: generated code should have no runtime dep on GIRepo
+                g_type(::Type{$(esc(oname))}) = esc(get_g_type)($obj) )))
+            push!(exports.args,oname)
+            push!(alldecs.args, :( const $oname = $modname.$oname ))
+
+            nsname = get_name(obj)
+            if nsname != oname
+                push!(decs, :( const $nsname = $oname ))
+            end
         end
     end
+    write_exprs("DEBUG", decs)
+    write_exprs("DEBUG2", alldecs.args)
 
-    mod = create_module(name,decs)
+    mod = create_module(modname,decs)
+    eval(_AllTypes, alldecs)
     _gi_modules[name] = mod
     mod
 end
@@ -72,7 +101,7 @@ function enum_decls(ns)
     for enum in enums 
         name = get_name(enum)
         longname = enum_name(enum)
-        push!(typedefs,enum_decl(enum,longname))
+        push!(typedefs,enum_decl(enum,name))
         push!(aliases, :( const $name = _AllTypes.$longname))
     end
     (typedefs,aliases)
@@ -97,34 +126,15 @@ module _AllTypes
     import GI
     import Gtk
     using Gtk.GLib
-    # FIXME: I don't call this 'Leaf' right now
-    # so that it's distinguishable from Gtk.jl:s Leaf types
-    suffix = :Impl
 
     function enum_get(enum, sym::Symbol) 
         enum.(sym)
     end
     enum_get(enum, int::Integer) = int
     export enum_get
-    # temporary solution, the @type_decl should go right into the generated module
-    # and then aliased in here
-    function ensure_type(info::GI.GIObjectInfo)
-        g_type = GI.get_g_type(info)
-        name = symbol(GLib.g_type_name(g_type))
-        if name == :GObject
-            return name
-        end
-        if(isdefined(_AllTypes, name))
-            return name
-        end
-        @eval @GLib.Gtype_decl $name $g_type (
-            g_type(::Type{$(esc(name))}) = esc(get_g_type)($info) )
-        eval(Expr(:toplevel, Expr(:export, name)))
-        name
-    end
 end
 # we may use `using Alltypes` to mean "import all gtypenames"
-const ensure_type = _AllTypes.ensure_type 
+#const ensure_type = _AllTypes.ensure_type 
 
 
 type UnsupportedType <: Exception
@@ -153,16 +163,12 @@ end
 # we probably want this as a singleton
 dynctx = DynamicContext()
 
-        
+# type already created, but not constructor:
 function load_name(mod,ns,name::Symbol,info::GIObjectInfo)
-    gname = ensure_type(info)
-    itype = GLib.gtype_abstracts[gname]
-    eval(mod, :(const $name = $itype))
     if find_method(ns[name], :new) != nothing
-        #ensure_type might not do this, as there will be mutual dependency
         ensure_method(ns,name,:new) 
     end
-    itype
+    mod.(name)
 end
 
 function load_name(mod,ns,name::Symbol,info::GIInterfaceInfo)
@@ -354,6 +360,7 @@ function create_method(info::GIFunctionInfo,ctx::GenContext)
         push!(cargs, Arg(:instance, typeinfo.ctype))
     end
     if flags & IS_CONSTRUCTOR != 0
+        #FIXME: mimic the new constructor style of Gtk.jl
         name = symbol("$(get_name(get_container(info)))_$name")
     end
     rettype = extract_type(get_return_type(info))
@@ -425,7 +432,7 @@ macro gimport(ns, names)
     _name = (ns == :Gtk) ? :_Gtk : ns
     NS = get_ns(ns)
     ns = GINamespace(ns)
-    q = quote  $(esc(_name)) = $(NS) end
+    q = quote const $(esc(_name)) = $(NS) end
     if isa(names,Expr)  && names.head == :tuple
         names = names.args
     else 
